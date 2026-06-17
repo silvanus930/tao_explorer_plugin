@@ -49,8 +49,8 @@ let sheetsAutoSyncTimer = null;
 const TRACKING_ALARM = 'track-missing-subnet-metrics';
 const SYNC_STATUS_KEY = 'subnetSyncStatus';
 const TRACKING_NETUID_MAX = 256;
-const SCRAPE_WAIT_MS = 4_000;
-const SCRAPE_READY_TIMEOUT_MS = 15_000;
+const SCRAPE_WAIT_MS = 8_000;
+const SCRAPE_READY_TIMEOUT_MS = 30_000;
 const ABORT_POLL_MS = 200;
 
 function subnetMetagraphUrl(netuid) {
@@ -69,6 +69,10 @@ let scrapeWindowId = null;
 let scrapeMetagraphTabId = null;
 
 function needsMetagraphScrape(entry) {
+  if (needsIncentiveMinerCount(entry)) {
+    return true;
+  }
+
   if (!entry || entry.ownerIncentive == null) {
     return true;
   }
@@ -91,6 +95,11 @@ function needsMetagraphScrape(entry) {
 
 function needsRegFeeScrape(entry) {
   return !entry || entry.burnTao == null;
+}
+
+function needsIncentiveMinerCount(entry) {
+  const count = Number(entry?.incentiveMinerCount);
+  return !Number.isInteger(count) || count < 0;
 }
 
 async function applyBulkRegFees(netuids, settings, ttl) {

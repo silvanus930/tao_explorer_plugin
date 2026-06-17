@@ -1,11 +1,11 @@
 # TAO Subnet Analytics
 
-Chrome extension that adds **Burn Rate** and **Reg. Fee** columns to the [tao.app](https://www.tao.app/explorer) subnet explorer.
+Chrome extension that adds **Burn Rate**, **Reg. Fee**, and **Miners** columns to the [tao.app](https://www.tao.app/explorer) subnet explorer.
 
 ## Features
 
-- Injects two analytics columns into the subnet table on `tao.app/explorer`
-- Fetches live registration burn from Bittensor Finney RPC via selective metagraph
+- Injects analytics columns into the subnet table on `tao.app/explorer`
+- Fetches live registration burn from Bittensor Finney RPC; miner counts from metagraph table scrape
 - Loads subnet data lazily for visible explorer rows to stay within RPC limits
 - Caches results locally (default 10 minutes) to reduce RPC load
 - **Google Sheets sync** — back up cache and restore it on another browser/machine
@@ -18,6 +18,7 @@ Chrome extension that adds **Burn Rate** and **Reg. Fee** columns to the [tao.ap
 | --- | --- | --- |
 | **Burn Rate** | Metagraph scrape | Owner incentive (0–1) from subnet metagraph |
 | **Reg. Fee** | On-chain burn | Current TAO cost for burned registration on that subnet |
+| **Miners** | Metagraph scrape | Active miners with Incentive &gt; 0 (owner excluded); shows **40+** when count exceeds 40 |
 
 ## Install (development)
 

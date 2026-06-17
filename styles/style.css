@@ -118,6 +118,11 @@
   min-width: 3.5ch;
 }
 
+.tao-analytics-cell.tao-analytics-miners {
+  color: #e2e8f0 !important;
+  min-width: 2.5ch;
+}
+
 @media (prefers-color-scheme: light) {
   .tao-analytics-cell.tao-analytics-fee {
     color: #64748b !important;

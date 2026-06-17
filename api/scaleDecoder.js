@@ -54,6 +54,12 @@ class ScaleReader {
     return num;
   }
 
+  readU16() {
+    const low = this.readByte();
+    const high = this.readByte();
+    return low | (high << 8);
+  }
+
   readOption(readInner) {
     const tag = this.readByte();
     if (tag === 0) {

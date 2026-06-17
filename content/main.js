@@ -21,12 +21,16 @@ const MESSAGE = {
 const COLUMN = {
   BURN: 'tao-analytics-burn',
   FEE: 'tao-analytics-fee',
+  MINERS: 'tao-analytics-miners',
 };
 
 const COLUMN_WIDTH = {
   burn: 96,
   fee: 88,
+  miners: 52,
 };
+
+const MINER_COUNT_DISPLAY_CAP = 40;
 
 const STORAGE_CACHE_KEY = 'subnetMetricsCache';
 const SYNC_STATUS_KEY = 'subnetSyncStatus';
@@ -50,7 +54,9 @@ let columnSortState = { key: null, direction: null };
 function isAnalyticsSortHeader(th) {
   return Boolean(
     th &&
-    (th.classList.contains(COLUMN.BURN) || th.classList.contains(COLUMN.FEE)) &&
+    (th.classList.contains(COLUMN.BURN) ||
+      th.classList.contains(COLUMN.FEE) ||
+      th.classList.contains(COLUMN.MINERS)) &&
     th.dataset.taoAnalyticsSort
   );
 }
@@ -68,17 +74,24 @@ function resetAnalyticsSortHeaderUi(tableInfo) {
 
   const burnHeader = headerRow.querySelector(`.${COLUMN.BURN}`);
   const feeHeader = headerRow.querySelector(`.${COLUMN.FEE}`);
+  const minersHeader = headerRow.querySelector(`.${COLUMN.MINERS}`);
 
-  if (burnHeader) {
+  if (burnHeader && refTh) {
     burnHeader.dataset.taoAnalyticsSort = 'burn';
     burnHeader.replaceChildren(buildSortableHeaderContent('Burn Rate', refTh));
     burnHeader.removeAttribute('aria-sort');
   }
 
-  if (feeHeader) {
+  if (feeHeader && refTh) {
     feeHeader.dataset.taoAnalyticsSort = 'fee';
     feeHeader.replaceChildren(buildSortableHeaderContent('Reg. Fee', refTh));
     feeHeader.removeAttribute('aria-sort');
+  }
+
+  if (minersHeader && refTh) {
+    minersHeader.dataset.taoAnalyticsSort = 'miners';
+    minersHeader.replaceChildren(buildSortableHeaderContent('Miners', refTh));
+    minersHeader.removeAttribute('aria-sort');
   }
 }
 
@@ -714,19 +727,387 @@ function isOrangeBurnElement(el) {
   return false;
 }
 
-function isMetagraphBurnPageReady() {
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isMetagraphScrapePageReady() {
   const activeTab = getActiveSubnetTab();
   if (activeTab !== 'metagraph') {
     return false;
   }
 
-  return Boolean(
-    document.querySelector('[aria-label="Owner incentive"]') ||
-    document.querySelector('table tbody tr')
+  const tableInfo = findMetagraphTable();
+  if (tableInfo) {
+    return isMetagraphIncentiveSortedDesc(tableInfo);
+  }
+
+  return Boolean(document.querySelector('[aria-label="Owner incentive"]'));
+}
+
+function isMetagraphBurnPageReady() {
+  return isMetagraphScrapePageReady();
+}
+
+function findMetagraphTable() {
+  const activeTab = getActiveSubnetTab();
+  if (activeTab !== 'metagraph') {
+    return null;
+  }
+
+  for (const table of document.querySelectorAll('table')) {
+    const headerCells = [...table.querySelectorAll('thead th')];
+    if (headerCells.length < 4) {
+      continue;
+    }
+
+    const headers = headerCells.map((cell) => normalizeText(cell.textContent));
+    const uidIdx = headers.findIndex((label) => label === 'UID');
+    const incentiveIdx = headers.findIndex((label) => /^incentive$/i.test(label));
+
+    if (uidIdx >= 0 && incentiveIdx >= 0) {
+      return { table, headers, uidIdx, incentiveIdx };
+    }
+  }
+
+  return null;
+}
+
+function parseIncentiveCellValue(text) {
+  const normalized = normalizeText(text);
+  if (!normalized || normalized === '—' || normalized === '-') {
+    return null;
+  }
+
+  const value = Number(normalized.replace(/,/g, ''));
+  return Number.isFinite(value) ? value : null;
+}
+
+function findMetagraphPaginationRoot(tableInfo) {
+  let root = tableInfo?.table ?? null;
+
+  for (let depth = 0; depth < 14 && root instanceof Element; depth += 1) {
+    const buttons = root.querySelectorAll('button');
+    const text = normalizeText(root.textContent);
+    if (buttons.length >= 2 && /\d+\s*\/\s*\d+/.test(text)) {
+      return root;
+    }
+    root = root.parentElement;
+  }
+
+  return tableInfo?.table?.closest('div') ?? null;
+}
+
+function findMetagraphPaginationButton(tableInfo, direction) {
+  const root = findMetagraphPaginationRoot(tableInfo);
+  if (!root) {
+    return null;
+  }
+
+  const buttons = [...root.querySelectorAll('button')];
+  const wantNext = direction === 'next';
+
+  return (
+    buttons.find((btn) => {
+      if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') {
+        return false;
+      }
+
+      const aria = String(btn.getAttribute('aria-label') || '').toLowerCase();
+      const text = normalizeText(btn.textContent).toLowerCase();
+
+      if (wantNext) {
+        return (
+          aria.includes('next page') ||
+          aria.includes('go to next') ||
+          text === 'next' ||
+          Boolean(btn.querySelector('svg.lucide-chevron-right, [class*="chevron-right"]'))
+        );
+      }
+
+      return (
+        aria.includes('previous page') ||
+        aria.includes('go to previous') ||
+        aria.includes('first page') ||
+        aria.includes('go to first') ||
+        text === 'previous' ||
+        text === 'prev' ||
+        Boolean(btn.querySelector('svg.lucide-chevron-left, [class*="chevron-left"]'))
+      );
+    }) ?? null
   );
 }
 
+function findMetagraphPaginationNext(tableInfo) {
+  return findMetagraphPaginationButton(tableInfo, 'next');
+}
+
+function findMetagraphPaginationPrev(tableInfo) {
+  return findMetagraphPaginationButton(tableInfo, 'prev');
+}
+
+function findMetagraphIncentiveSortButton(tableInfo) {
+  const headerRow = tableInfo.table.querySelector('thead tr');
+  if (!headerRow) {
+    return null;
+  }
+
+  const headers = [...headerRow.querySelectorAll('th')];
+  const th = headers[tableInfo.incentiveIdx];
+  return th?.querySelector('button') ?? null;
+}
+
+function isMetagraphIncentiveSortArrowUp(tableInfo) {
+  const button = findMetagraphIncentiveSortButton(tableInfo);
+  if (!button) {
+    return false;
+  }
+
+  const th = button.closest('th');
+  const aria = th?.getAttribute('aria-sort');
+  if (aria === 'ascending') {
+    return true;
+  }
+  if (aria === 'descending') {
+    return false;
+  }
+
+  const svg = button.querySelector('svg');
+  if (!svg) {
+    return false;
+  }
+
+  const cls = svg.className?.toString() ?? '';
+  const style = svg.getAttribute('style') ?? '';
+  return /rotate-180|scale-y-\[-1\]|rotate\(180deg\)/i.test(`${cls} ${style}`);
+}
+
+function isMetagraphIncentiveSortArrowDown(tableInfo) {
+  const button = findMetagraphIncentiveSortButton(tableInfo);
+  if (!button) {
+    return false;
+  }
+
+  const th = button.closest('th');
+  const aria = th?.getAttribute('aria-sort');
+  if (aria === 'descending') {
+    return true;
+  }
+  if (aria === 'ascending') {
+    return false;
+  }
+
+  const svg = button.querySelector('svg');
+  if (!svg) {
+    return false;
+  }
+
+  const cls = svg.className?.toString() ?? '';
+  const style = svg.getAttribute('style') ?? '';
+  const arrowPointsUp = /rotate-180|scale-y-\[-1\]|rotate\(180deg\)/i.test(`${cls} ${style}`);
+
+  // tao.app uses a down-chevron SVG; rotate-180 flips it to point up (ascending).
+  return !arrowPointsUp;
+}
+
+function isMetagraphIncentiveSortedDesc(tableInfo) {
+  return isMetagraphIncentiveSortArrowDown(tableInfo);
+}
+
+async function ensureMetagraphIncentiveSortDesc(tableInfo) {
+  if (isMetagraphIncentiveSortedDesc(tableInfo)) {
+    return tableInfo;
+  }
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (isMetagraphIncentiveSortedDesc(tableInfo)) {
+      return tableInfo;
+    }
+
+    const sortButton = findMetagraphIncentiveSortButton(tableInfo);
+    if (!sortButton) {
+      return tableInfo;
+    }
+
+    sortButton.click();
+    await delay(500);
+    tableInfo = findMetagraphTable() || tableInfo;
+  }
+
+  return tableInfo;
+}
+
+async function prepareMetagraphTableForScrape() {
+  let tableInfo = findMetagraphTable();
+  if (!tableInfo) {
+    return null;
+  }
+
+  if (!isMetagraphIncentiveSortedDesc(tableInfo)) {
+    tableInfo = await ensureMetagraphIncentiveSortDesc(tableInfo);
+  }
+
+  if (!isMetagraphIncentiveSortedDesc(tableInfo)) {
+    return null;
+  }
+
+  return tableInfo;
+}
+
+async function goToMetagraphFirstPage(tableInfo) {
+  let current = tableInfo;
+
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    const prev = findMetagraphPaginationPrev(current);
+    if (!prev) {
+      break;
+    }
+
+    const before = current.table.querySelector('tbody')?.textContent ?? '';
+    prev.click();
+    await delay(400);
+    const refreshed = findMetagraphTable();
+    if (!refreshed) {
+      break;
+    }
+
+    const after = refreshed.table.querySelector('tbody')?.textContent ?? '';
+    current = refreshed;
+    if (after === before) {
+      break;
+    }
+  }
+
+  return current;
+}
+
+function metagraphPageHasOnlyZeroIncentives(tableInfo) {
+  let sawNonOwner = false;
+
+  for (const row of tableInfo.table.querySelectorAll('tbody tr')) {
+    if (isMetagraphOwnerMinerRow(row, tableInfo)) {
+      continue;
+    }
+
+    sawNonOwner = true;
+    const cells = [...row.querySelectorAll('td')];
+    const incentive = parseIncentiveCellValue(cells[tableInfo.incentiveIdx]?.textContent);
+    if (incentive != null && incentive > 0) {
+      return false;
+    }
+  }
+
+  return sawNonOwner;
+}
+
+function isMetagraphOwnerMinerRow(row, tableInfo) {
+  const cells = [...row.querySelectorAll('td')];
+  const incentiveCell = cells[tableInfo.incentiveIdx];
+  if (!incentiveCell) {
+    return false;
+  }
+
+  if (row.querySelector('[aria-label="Owner incentive"]')) {
+    return true;
+  }
+
+  if (isOrangeBurnElement(incentiveCell)) {
+    return true;
+  }
+
+  if (incentiveCell.querySelector('svg.lucide-flame, [class*="flame"]')) {
+    return true;
+  }
+
+  const typeIdx = tableInfo.headers.findIndex((label) => label === 'Type');
+  if (typeIdx >= 0) {
+    const typeCell = cells[typeIdx];
+    const typeText = normalizeText(typeCell?.textContent).toLowerCase();
+    const typeAria = String(typeCell?.getAttribute('aria-label') || '').toLowerCase();
+    if (typeText.includes('owner') || typeAria.includes('owner')) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function collectPositiveIncentiveUidsFromMetagraphPage(tableInfo) {
+  const positiveUids = new Set();
+
+  tableInfo.table.querySelectorAll('tbody tr').forEach((row) => {
+    if (isMetagraphOwnerMinerRow(row, tableInfo)) {
+      return;
+    }
+
+    const cells = [...row.querySelectorAll('td')];
+    const uid = parseNetuid(cells[tableInfo.uidIdx]?.textContent);
+    const incentive = parseIncentiveCellValue(cells[tableInfo.incentiveIdx]?.textContent);
+
+    if (uid != null && incentive != null && incentive > 0) {
+      positiveUids.add(uid);
+    }
+  });
+
+  return positiveUids;
+}
+
+async function collectIncentiveMinerCountFromMetagraphTable() {
+  let tableInfo = await prepareMetagraphTableForScrape();
+  if (!tableInfo) {
+    return null;
+  }
+
+  tableInfo = await goToMetagraphFirstPage(tableInfo);
+
+  const positiveUids = new Set();
+  let pages = 0;
+
+  while (pages < 40) {
+    collectPositiveIncentiveUidsFromMetagraphPage(tableInfo).forEach((uid) => {
+      positiveUids.add(uid);
+    });
+
+    if (positiveUids.size > MINER_COUNT_DISPLAY_CAP) {
+      break;
+    }
+
+    if (metagraphPageHasOnlyZeroIncentives(tableInfo)) {
+      break;
+    }
+
+    const next = findMetagraphPaginationNext(tableInfo);
+    if (!next) {
+      break;
+    }
+
+    const before = tableInfo.table.querySelector('tbody')?.textContent ?? '';
+    next.click();
+    await delay(500);
+
+    const refreshed = findMetagraphTable();
+    if (!refreshed) {
+      break;
+    }
+
+    const after = refreshed.table.querySelector('tbody')?.textContent ?? '';
+    if (after === before) {
+      break;
+    }
+
+    tableInfo = refreshed;
+    pages += 1;
+  }
+
+  return positiveUids.size;
+}
+
 function collectOwnerIncentiveFromDom() {
+  const tableInfo = findMetagraphTable();
+  if (tableInfo && !isMetagraphIncentiveSortedDesc(tableInfo)) {
+    return null;
+  }
+
   let best = null;
 
   const rows = document.querySelectorAll('div.flex.items-center.justify-between');
@@ -787,6 +1168,10 @@ function collectOwnerIncentiveFromDom() {
 
   // On metagraph: no yellow/orange owner incentive visible → burn rate is 0.
   if (isMetagraphBurnPageReady()) {
+    const readyTable = findMetagraphTable();
+    if (readyTable && !isMetagraphIncentiveSortedDesc(readyTable)) {
+      return null;
+    }
     return 0;
   }
 
@@ -890,6 +1275,7 @@ function ensureColgroup(tableInfo) {
   const nameCol = cols[tableInfo.nameIdx];
   let burnCol = colgroup.querySelector('.tao-analytics-col-burn');
   let feeCol = colgroup.querySelector('.tao-analytics-col-fee');
+  let minersCol = colgroup.querySelector('.tao-analytics-col-miners');
 
   if (!burnCol) {
     burnCol = document.createElement('col');
@@ -911,8 +1297,19 @@ function ensureColgroup(tableInfo) {
     }
   }
 
+  if (!minersCol) {
+    minersCol = document.createElement('col');
+    minersCol.className = 'tao-analytics-col-miners';
+    if (feeCol.nextSibling) {
+      colgroup.insertBefore(minersCol, feeCol.nextSibling);
+    } else {
+      colgroup.appendChild(minersCol);
+    }
+  }
+
   applyColumnWidth(burnCol, COLUMN_WIDTH.burn);
   applyColumnWidth(feeCol, COLUMN_WIDTH.fee);
+  applyColumnWidth(minersCol, COLUMN_WIDTH.miners);
 }
 
 function setSortableHeaderLabel(button, label) {
@@ -1018,6 +1415,50 @@ function parseBurnFromCell(burnCell) {
   return parseBurnRate(text);
 }
 
+function formatMinerCount(value) {
+  if (!Number.isInteger(value) || value < 0) {
+    return '—';
+  }
+
+  if (value > MINER_COUNT_DISPLAY_CAP) {
+    return `${MINER_COUNT_DISPLAY_CAP}+`;
+  }
+
+  return String(value);
+}
+
+function formatMinerCountTitle(value) {
+  if (!Number.isInteger(value) || value < 0) {
+    return 'Loading miner count';
+  }
+
+  if (value > MINER_COUNT_DISPLAY_CAP) {
+    return `More than ${MINER_COUNT_DISPLAY_CAP} active miners with positive incentive (owner excluded)`;
+  }
+
+  return `Active miners with positive incentive: ${value} (owner row excluded)`;
+}
+
+function getIncentiveMinerCountFromData(data) {
+  const count = Number(data?.incentiveMinerCount);
+  return Number.isInteger(count) && count >= 0 ? count : null;
+}
+
+function parseMinerCountFromCell(minersCell) {
+  const text = normalizeText(minersCell?.textContent);
+  if (!text || text === '…' || text === '—') {
+    return null;
+  }
+
+  const capped = text.match(/^(\d+)\+$/);
+  if (capped) {
+    return Number(capped[1]) + 1;
+  }
+
+  const count = Number(text.replace(/,/g, ''));
+  return Number.isInteger(count) && count >= 0 ? count : null;
+}
+
 function parseFeeFromCell(feeCell) {
   const text = normalizeText(feeCell?.textContent);
   if (!text || text === '…' || text === '—') {
@@ -1048,6 +1489,14 @@ function getRowSortValue(row, tableInfo, sortKey, taoUsdPrice) {
       return feeUsd;
     }
     return parseFeeFromCell(row.querySelector(`.${COLUMN.FEE}`));
+  }
+
+  if (sortKey === 'miners') {
+    const minerCount = getIncentiveMinerCountFromData(data);
+    if (minerCount != null) {
+      return minerCount;
+    }
+    return parseMinerCountFromCell(row.querySelector(`.${COLUMN.MINERS}`));
   }
 
   return null;
@@ -1245,6 +1694,7 @@ function ensureHeader(tableInfo) {
 
   let burnHeader = headerRow.querySelector(`.${COLUMN.BURN}`);
   let feeHeader = headerRow.querySelector(`.${COLUMN.FEE}`);
+  let minersHeader = headerRow.querySelector(`.${COLUMN.MINERS}`);
 
   if (!burnHeader) {
     burnHeader = createHeaderCell(
@@ -1274,10 +1724,25 @@ function ensureHeader(tableInfo) {
     populateSortableHeader(feeHeader, 'Reg. Fee', refTh, 'fee');
   }
 
+  if (!minersHeader) {
+    minersHeader = createHeaderCell(
+      'Miners',
+      COLUMN.MINERS,
+      'Miners with positive incentive in the metagraph table (excludes owner/burn row)',
+      refTh,
+      COLUMN_WIDTH.miners,
+      'miners'
+    );
+    insertAfter(feeHeader, minersHeader);
+  } else {
+    populateSortableHeader(minersHeader, 'Miners', refTh, 'miners');
+  }
+
   applyColumnWidth(burnHeader, COLUMN_WIDTH.burn);
   applyColumnWidth(feeHeader, COLUMN_WIDTH.fee);
+  applyColumnWidth(minersHeader, COLUMN_WIDTH.miners);
 
-  return { burnHeader, feeHeader, nameTh, refTh };
+  return { burnHeader, feeHeader, minersHeader, nameTh, refTh };
 }
 
 function getNameCell(row, tableInfo) {
@@ -1351,9 +1816,13 @@ function enhanceRow(row, tableInfo, styleRef, taoUsdPrice) {
   const feeTitle = data
     ? `Registration fee: ${feeUsd != null ? formatUsd(feeUsd) : '—'}`
     : 'Loading registration fee';
+  const minerCount = getIncentiveMinerCountFromData(data);
+  const minersText = data ? formatMinerCount(minerCount) : '—';
+  const minersTitle = data ? formatMinerCountTitle(minerCount) : 'Loading miner count';
 
   let burnCell = row.querySelector(`.${COLUMN.BURN}`);
   let feeCell = row.querySelector(`.${COLUMN.FEE}`);
+  let minersCell = row.querySelector(`.${COLUMN.MINERS}`);
 
   if (!burnCell) {
     burnCell = createBodyCell(
@@ -1402,6 +1871,25 @@ function enhanceRow(row, tableInfo, styleRef, taoUsdPrice) {
       feeCell.title = feeTitle;
     }
     applyColumnWidth(feeCell, COLUMN_WIDTH.fee);
+  }
+
+  if (!minersCell) {
+    minersCell = createBodyCell(
+      COLUMN.MINERS,
+      minersText,
+      minersTitle,
+      styleRef.refTd,
+      COLUMN_WIDTH.miners
+    );
+    insertAfter(feeCell, minersCell);
+  } else {
+    if (minersCell.textContent !== minersText) {
+      minersCell.textContent = minersText;
+    }
+    if (minersCell.title !== minersTitle) {
+      minersCell.title = minersTitle;
+    }
+    applyColumnWidth(minersCell, COLUMN_WIDTH.miners);
   }
 }
 
@@ -1611,6 +2099,7 @@ function initSubnetPageScrape() {
   }
 
   let lastOwnerIncentive = null;
+  let lastIncentiveMinerCount = null;
   const lastRegSignatureRef = { value: null };
   let lastHref = location.href;
   let scrapeReadyTimer = null;
@@ -1618,6 +2107,7 @@ function initSubnetPageScrape() {
   let observer = null;
   let urlWatcher = null;
   let burst = null;
+  let metagraphScrapePromise = null;
 
   const teardownSubnetScrape = () => {
     if (scrapeReadyTimer != null) {
@@ -1684,6 +2174,32 @@ function initSubnetPageScrape() {
     return true;
   };
 
+  const scrapeIncentiveMinerCount = async () => {
+    const minerCount = await collectIncentiveMinerCountFromMetagraphTable();
+    if (minerCount == null) {
+      return false;
+    }
+
+    if (minerCount === lastIncentiveMinerCount) {
+      return true;
+    }
+
+    lastIncentiveMinerCount = minerCount;
+    await upsertMetricCache(netuid, {
+      incentiveMinerCount: minerCount,
+      incentiveMinerCountCapturedAt: Date.now(),
+      source: 'dom',
+    });
+    return true;
+  };
+
+  const scrapeMetagraphMetrics = async () => {
+    let scraped = false;
+    scraped = (await scrapeIncentiveMinerCount()) || scraped;
+    scraped = (await scrapeOwnerIncentive()) || scraped;
+    return scraped;
+  };
+
   const scrapeRegFee = async () => {
     // tao.app PARAMETERS panel: label + value in a flex row (label has info button).
     const rows = document.querySelectorAll('div.flex.items-center.justify-between');
@@ -1745,8 +2261,13 @@ function initSubnetPageScrape() {
     let scraped = false;
 
     if (activeTab === 'metagraph') {
-      scraped = (await scrapeOwnerIncentive()) || scraped;
-      if (scraped || isMetagraphBurnPageReady()) {
+      if (!metagraphScrapePromise) {
+        metagraphScrapePromise = scrapeMetagraphMetrics().finally(() => {
+          metagraphScrapePromise = null;
+        });
+      }
+      scraped = (await metagraphScrapePromise) || scraped;
+      if (scraped || isMetagraphScrapePageReady()) {
         notifyScrapeReady();
       }
       return;
@@ -1789,6 +2310,7 @@ function initSubnetPageScrape() {
 
     lastHref = location.href;
     lastOwnerIncentive = null;
+    lastIncentiveMinerCount = null;
     lastRegSignatureRef.value = null;
     tryScrape();
   }, 400);

@@ -195,7 +195,11 @@ async function fetchAllSubnetRegFees(netuids = []) {
           try {
             const metric = await fetchSubnetRegFeeFallback(netuid);
             if (metric) {
-              metrics.set(netuid, metric);
+              const existing = metrics.get(netuid);
+              metrics.set(
+                netuid,
+                existing ? { ...existing, ...metric, netuid } : { ...metric, netuid }
+              );
             }
           } catch {
             // Skip failed lookups.
