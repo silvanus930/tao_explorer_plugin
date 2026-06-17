@@ -218,70 +218,90 @@ html[data-tao-analytics-miner-emissions='on'] .tao-analytics-header.tao-analytic
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
-  margin-right: 0.5rem;
-  padding: 0.25rem 0.375rem;
-  background: rgba(39, 39, 42, 0.94);
-  border-radius: 9999px;
-  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.16);
+  margin-right: 0.625rem;
 }
 
 .tao-analytics-subnet-nav {
   display: inline-flex;
   align-items: center;
-  gap: 0.375rem;
+  gap: 0.5rem;
   flex-shrink: 0;
-  padding: 0 0.125rem;
+  padding: 0.125rem 0.25rem;
+  --tao-subnet-nav-radius: 0.5rem;
+  --tao-subnet-nav-border: rgba(113, 113, 122, 0.55);
+  --tao-subnet-nav-bg: rgba(24, 24, 27, 0.75);
+  --tao-subnet-nav-bg-hover: rgba(24, 24, 27, 0.9);
+  --tao-subnet-nav-bg-active: rgba(9, 9, 11, 0.95);
+  --tao-subnet-nav-focus-ring: 0 0 0 2px rgba(113, 113, 122, 0.3);
+}
+
+.tao-analytics-subnet-nav-btn,
+.tao-analytics-subnet-nav-input {
+  height: 2rem;
+  border: 1px solid var(--tao-subnet-nav-border);
+  border-radius: var(--tao-subnet-nav-radius);
+  background: var(--tao-subnet-nav-bg);
+  color: #fafafa;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  box-sizing: border-box;
+  transition:
+    border-color 0.15s ease,
+    background-color 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
 .tao-analytics-subnet-nav-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 2rem;
-  padding: 0 0.75rem;
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  border-radius: 0.5rem;
-  background: transparent;
-  color: inherit;
-  font-size: 0.875rem;
+  min-width: 2.75rem;
+  padding: 0 0.875rem;
+  font-size: 0.8125rem;
   font-weight: 500;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
   cursor: pointer;
   white-space: nowrap;
-  transition: background-color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
 }
 
-.tao-analytics-subnet-nav-btn:hover:not(:disabled) {
-  background: rgba(148, 163, 184, 0.12);
-  border-color: rgba(148, 163, 184, 0.55);
+.tao-analytics-subnet-nav-btn:hover:not(:disabled),
+.tao-analytics-subnet-nav-input:hover {
+  border-color: rgba(161, 161, 170, 0.6);
+  background: var(--tao-subnet-nav-bg-hover);
+}
+
+.tao-analytics-subnet-nav-btn:active:not(:disabled) {
+  background: var(--tao-subnet-nav-bg-active);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.tao-analytics-subnet-nav-btn:focus-visible,
+.tao-analytics-subnet-nav-input:focus {
+  outline: none;
+  border-color: rgba(212, 212, 216, 0.75);
+  background: var(--tao-subnet-nav-bg-active);
+  box-shadow: var(--tao-subnet-nav-focus-ring);
 }
 
 .tao-analytics-subnet-nav-btn:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: not-allowed;
+  pointer-events: none;
 }
 
 .tao-analytics-subnet-nav-input {
   width: 3.25rem;
-  height: 2rem;
-  padding: 0 0.375rem;
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  border-radius: 0.5rem;
-  background: transparent;
-  color: inherit;
+  padding: 0 0.5rem;
   font-size: 0.875rem;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
+  font-weight: 600;
   text-align: center;
-  line-height: 1;
-  box-sizing: border-box;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
-.tao-analytics-subnet-nav-input:focus {
-  outline: none;
-  border-color: rgba(148, 163, 184, 0.65);
-  background: rgba(148, 163, 184, 0.08);
+.tao-analytics-subnet-nav-input::placeholder {
+  color: rgba(161, 161, 170, 0.65);
+  font-weight: 500;
 }
 
 .tao-analytics-subnet-nav-input::-webkit-outer-spin-button,

@@ -33,7 +33,7 @@ const COLUMN_WIDTH_MINERS_EXPANDED = 200;
 const MINERS_EMISSIONS_PREF_KEY = 'showMinerEmissions';
 
 const MINER_COUNT_DISPLAY_CAP = 40;
-const SUBNET_NETUID_MAX = 256;
+const SUBNET_NETUID_MAX = 128;
 
 const STORAGE_CACHE_KEY = 'subnetMetricsCache';
 const SYNC_STATUS_KEY = 'subnetSyncStatus';
@@ -213,7 +213,7 @@ function getNetuidFromPath() {
   const match = location.pathname.match(/\/subnets\/(\d{1,3})/i);
   if (!match) return null;
   const netuid = Number(match[1]);
-  return Number.isInteger(netuid) && netuid >= 0 && netuid <= 256 ? netuid : null;
+  return Number.isInteger(netuid) && netuid >= 0 && netuid <= SUBNET_NETUID_MAX ? netuid : null;
 }
 
 function normalizeText(value) {
@@ -294,7 +294,7 @@ function parseNetuid(text) {
   }
 
   const netuid = Number(match[1]);
-  return netuid >= 0 && netuid <= 256 ? netuid : null;
+  return netuid >= 0 && netuid <= SUBNET_NETUID_MAX ? netuid : null;
 }
 
 function formatTaoDisplay(value) {
@@ -1547,7 +1547,12 @@ function navigateToSubnet(netuid, { newTab = false } = {}) {
 }
 
 function parseSubnetInputValue(input) {
-  const value = Number(input?.value);
+  const raw = input?.value;
+  if (raw === '' || raw == null) {
+    return null;
+  }
+
+  const value = Number(raw);
   if (!Number.isInteger(value) || value < 0 || value > SUBNET_NETUID_MAX) {
     return null;
   }
@@ -1624,7 +1629,7 @@ function findSubnetNavMountPoint() {
     });
 
     if (directTabs.length >= 3) {
-      return { parent, before: directTabs[0] };
+      return { tabBar: parent, before: directTabs[0] };
     }
   }
 
@@ -1632,10 +1637,82 @@ function findSubnetNavMountPoint() {
     (el) => normalizeText(el.textContent) === 'About',
   );
   if (aboutTab?.parentElement) {
-    return { parent: aboutTab.parentElement, before: aboutTab };
+    return { tabBar: aboutTab.parentElement, before: aboutTab };
   }
 
   return null;
+}
+
+function normalizeSubnetNavControls(nav) {
+  if (!nav) {
+    return;
+  }
+
+  const input = nav.querySelector('.tao-analytics-subnet-nav-input');
+  const wrap = input?.closest('.tao-analytics-subnet-nav-input-wrap');
+  if (wrap && input) {
+    wrap.replaceWith(input);
+  }
+
+  for (const btn of nav.querySelectorAll('.tao-analytics-subnet-nav-btn')) {
+    btn.className = 'tao-analytics-subnet-nav-btn';
+    btn.removeAttribute('style');
+  }
+
+  if (input) {
+    input.className = 'tao-analytics-subnet-nav-input';
+    input.removeAttribute('style');
+  }
+}
+
+function applySubnetNavBarStyles(section) {
+  const tabBar = findSubnetNavMountPoint()?.tabBar;
+  if (!(section instanceof HTMLElement) || !(tabBar instanceof HTMLElement)) {
+    return false;
+  }
+
+  const styles = getComputedStyle(tabBar);
+  section.style.display = 'inline-flex';
+  section.style.alignItems = styles.alignItems || 'center';
+  section.style.gap = styles.gap || styles.columnGap || '0.25rem';
+  section.style.padding = styles.padding;
+  section.style.borderRadius = styles.borderRadius;
+  section.style.background = styles.background;
+  section.style.backgroundColor = styles.backgroundColor;
+  section.style.boxShadow = styles.boxShadow;
+  section.style.border = styles.border;
+  section.style.flexShrink = '0';
+  const host = tabBar.parentElement;
+  section.style.marginRight = host?.dataset.taoSubnetToolbarHost === '1' ? '0' : '0.625rem';
+  return true;
+}
+
+function syncSubnetToolbarHost(tabBar) {
+  const host = tabBar?.parentElement;
+  if (!(host instanceof HTMLElement) || host.dataset.taoSubnetToolbarHost === '1') {
+    return;
+  }
+
+  host.dataset.taoSubnetToolbarHost = '1';
+  const display = getComputedStyle(host).display;
+  if (display === 'block' || display === 'flex' || display === 'inline-flex') {
+    host.style.display = 'flex';
+    host.style.alignItems = 'center';
+    host.style.flexWrap = 'wrap';
+    host.style.gap = '0.625rem';
+  }
+}
+
+function unwrapGoCardFromTabBar() {
+  const section = document.querySelector('.tao-analytics-subnet-nav-section');
+  const mount = findSubnetNavMountPoint();
+  if (!(section instanceof HTMLElement) || !mount?.tabBar) {
+    return;
+  }
+
+  if (mount.tabBar.contains(section) && mount.tabBar !== section) {
+    mount.tabBar.parentElement?.insertBefore(section, mount.tabBar);
+  }
 }
 
 function unwrapLegacySubnetNavLayout() {
@@ -1661,26 +1738,16 @@ function unwrapLegacySubnetNavLayout() {
 }
 
 function isSubnetNavigatorPlaced(mount, section) {
-  if (!section || !mount?.before || !mount?.parent) {
+  if (!section || !mount?.tabBar) {
     return false;
   }
 
-  if (section.parentElement !== mount.parent) {
+  const host = mount.tabBar.parentElement;
+  if (!host || section.parentElement !== host) {
     return false;
   }
 
-  let node = section.nextSibling;
-  while (node) {
-    if (node === mount.before) {
-      return true;
-    }
-    if (node instanceof HTMLElement && node.classList.contains('tao-analytics-subnet-nav-section')) {
-      break;
-    }
-    node = node.nextSibling;
-  }
-
-  return section.nextSibling === mount.before;
+  return section.nextSibling === mount.tabBar;
 }
 
 function bindSubnetNavigator(nav) {
@@ -1721,12 +1788,13 @@ function updateSubnetNavigatorState(nav) {
   const input = nav.querySelector('.tao-analytics-subnet-nav-input');
   const prevBtn = nav.querySelector('[data-action="prev"]');
   const nextBtn = nav.querySelector('[data-action="next"]');
-  const inputValue = parseSubnetInputValue(input);
-  const inputDiffers = inputValue != null && inputValue !== netuid;
 
   if (input && netuid != null && document.activeElement !== input) {
     input.value = String(netuid);
   }
+
+  const inputValue = parseSubnetInputValue(input);
+  const inputDiffers = inputValue != null && inputValue !== netuid;
 
   if (prevBtn) {
     if (inputDiffers) {
@@ -1757,6 +1825,7 @@ function createSubnetNavigator() {
   prevBtn.className = 'tao-analytics-subnet-nav-btn';
   prevBtn.dataset.action = 'prev';
   prevBtn.textContent = 'Prev';
+  prevBtn.setAttribute('aria-label', 'Previous subnet');
 
   const input = document.createElement('input');
   input.type = 'number';
@@ -1766,12 +1835,14 @@ function createSubnetNavigator() {
   input.inputMode = 'numeric';
   input.placeholder = 'SN';
   input.title = 'Subnet number (Enter to go)';
+  input.setAttribute('aria-label', 'Subnet number');
 
   const nextBtn = document.createElement('button');
   nextBtn.type = 'button';
   nextBtn.className = 'tao-analytics-subnet-nav-btn';
   nextBtn.dataset.action = 'next';
   nextBtn.textContent = 'Next';
+  nextBtn.setAttribute('aria-label', 'Next subnet');
 
   nav.append(prevBtn, input, nextBtn);
   section.append(nav);
@@ -1810,6 +1881,7 @@ function ensureSubnetNavigator() {
 
   try {
     unwrapLegacySubnetNavLayout();
+    unwrapGoCardFromTabBar();
 
     let section = document.querySelector('.tao-analytics-subnet-nav-section');
     let nav = section?.querySelector('.tao-analytics-subnet-nav') ?? null;
@@ -1826,12 +1898,18 @@ function ensureSubnetNavigator() {
     }
 
     if (section && !isSubnetNavigatorPlaced(mount, section)) {
-      mount.parent.insertBefore(section, mount.before);
+      mount.tabBar.parentElement?.insertBefore(section, mount.tabBar);
     }
 
+    syncSubnetToolbarHost(mount.tabBar);
     section?.querySelector('.tao-analytics-subnet-nav-gap')?.remove();
 
+    if (section) {
+      applySubnetNavBarStyles(section);
+    }
+
     if (nav) {
+      normalizeSubnetNavControls(nav);
       updateSubnetNavigatorState(nav);
     }
   } finally {
@@ -1870,7 +1948,14 @@ function initSubnetNavigator() {
     }
     mountTimer = setTimeout(() => {
       mountTimer = null;
-      if (!document.querySelector('.tao-analytics-subnet-nav')) {
+      const nav = document.querySelector('.tao-analytics-subnet-nav');
+      const section = document.querySelector('.tao-analytics-subnet-nav-section');
+      if (nav) {
+        if (section) {
+          applySubnetNavBarStyles(section);
+        }
+        normalizeSubnetNavControls(nav);
+      } else {
         ensureSubnetNavigator();
       }
     }, 120);
