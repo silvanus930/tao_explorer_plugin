@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TAO Subnet Analytics",
-  "version": "1.5.10",
+  "version": "1.5.11",
   "description": "Adds subnet burn rate and registration fee to tao.app explorer",
   "permissions": [
     "storage",

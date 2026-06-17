@@ -18,6 +18,12 @@ const extensionIdEl = document.getElementById('extension-id');
 const oauthClientIdEl = document.getElementById('oauth-client-id');
 const oauthSetupWarningEl = document.getElementById('oauth-setup-warning');
 const sheetDefaultHintEl = document.getElementById('sheet-default-hint');
+const ownSheetEntry = document.getElementById('own-sheet-entry');
+const sheetsOwnSection = document.getElementById('sheets-own-section');
+const getOwnSheetBtn = document.getElementById('get-own-sheet-btn');
+const hideOwnSheetBtn = document.getElementById('hide-own-sheet-btn');
+
+let ownSheetControlsVisible = false;
 
 function getBuiltInSheetUrl() {
   return typeof DEFAULT_SHEET_URL === 'string' ? DEFAULT_SHEET_URL.trim() : '';
@@ -47,6 +53,12 @@ function inspectOAuthSetup() {
     return;
   }
 
+  if (!ownSheetControlsVisible) {
+    oauthSetupWarningEl.textContent = '';
+    oauthSetupWarningEl.classList.add('hidden');
+    return;
+  }
+
   let warning = '';
 
   if (!clientId || clientId.includes('{0}') || /REPLACE/i.test(clientId)) {
@@ -73,6 +85,34 @@ function inspectOAuthSetup() {
 }
 
 inspectOAuthSetup();
+
+function setOwnSheetControlsVisible(show, { persist = true } = {}) {
+  ownSheetControlsVisible = Boolean(show);
+
+  sheetsOwnSection?.classList.toggle('hidden', !ownSheetControlsVisible);
+  ownSheetEntry?.classList.toggle('hidden', ownSheetControlsVisible);
+  inspectOAuthSetup();
+
+  if (persist) {
+    chrome.storage.sync.set({ sheetsShowOwnControls: ownSheetControlsVisible }).catch(() => {});
+  }
+}
+
+getOwnSheetBtn?.addEventListener('click', () => {
+  setOwnSheetControlsVisible(true);
+});
+
+hideOwnSheetBtn?.addEventListener('click', async () => {
+  sheetsEnabled.checked = false;
+  sheetsAutoSync.checked = false;
+  setOwnSheetControlsVisible(false);
+  try {
+    await saveSheetsSettings();
+    setSheetsStatus('Using community sheet only. Pull still works without sign-in.');
+  } catch (error) {
+    setSheetsStatus(error.message || 'Failed to save Sheets settings.', true);
+  }
+});
 
 const versionBadge = document.getElementById('version-badge');
 if (versionBadge) {
@@ -127,6 +167,7 @@ async function loadSettings() {
     sheetsAutoSync: true,
     sheetsPullOnLoad: true,
     sheetsPublicPull: true,
+    sheetsShowOwnControls: false,
   });
 
   refreshMinutes.value = stored.refreshMinutes;
@@ -137,6 +178,9 @@ async function loadSettings() {
   sheetsAutoSync.checked = stored.sheetsAutoSync !== false;
   sheetsPullOnLoad.checked = stored.sheetsPullOnLoad !== false;
   sheetsPublicPull.checked = stored.sheetsPublicPull !== false;
+
+  const showOwnControls = stored.sheetsShowOwnControls === true || stored.sheetsEnabled === true;
+  setOwnSheetControlsVisible(showOwnControls, { persist: false });
 
   const builtIn = getBuiltInSheetUrl();
   if (sheetDefaultHintEl && builtIn) {
@@ -207,6 +251,7 @@ createSheetBtn.addEventListener('click', async () => {
 
     sheetsEnabled.checked = true;
     sheetsSpreadsheetId.value = response.spreadsheetUrl || response.spreadsheetId || '';
+    setOwnSheetControlsVisible(true);
     await saveSheetsSettings();
 
     setSheetsStatus(

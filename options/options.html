@@ -364,6 +364,38 @@
         display: none;
       }
 
+      .hidden {
+        display: none !important;
+      }
+
+      .own-sheet-entry {
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border);
+      }
+
+      .own-sheet-entry .field-hint {
+        margin-top: 0;
+        margin-bottom: 8px;
+      }
+
+      .own-sheet-entry .btn {
+        margin-top: 0;
+      }
+
+      .sheets-own-section {
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border);
+      }
+
+      .sheets-own-section .card-subtitle {
+        margin: 0 0 10px;
+        font-size: 0.76rem;
+        font-weight: 600;
+        color: #cbd5e1;
+      }
+
       .status-bar {
         min-height: 0;
         padding: 0;
@@ -447,42 +479,11 @@
       <section class="card">
         <h2 class="card-title">Google Sheets sync</h2>
         <p class="card-desc">
-          Community sheet is pre-filled for new users — pull burn/reg fee cache without setup.
-          Maintainer pushes updates; others pull on first open (public link, no sign-in).
+          Pull burn/reg fee cache from the community sheet — no Google sign-in required.
+          Maintainers can use their own sheet to push updates.
         </p>
 
-        <p id="oauth-setup-warning" class="oauth-warning hidden"></p>
-
-        <details class="oauth-details">
-          <summary>OAuth setup IDs</summary>
-          <div class="oauth-body">
-            <div class="id-block">
-              <p class="id-label">Extension ID</p>
-              <p class="id-hint">Google Cloud → Clients → Chrome extension → Application ID</p>
-              <div class="id-value-row">
-                <code class="id-value" id="extension-id"></code>
-                <button type="button" class="copy-btn" data-copy-target="extension-id">Copy</button>
-              </div>
-            </div>
-            <div class="id-block">
-              <p class="id-label">OAuth Client ID</p>
-              <p class="id-hint">
-                Put in <code>.env</code> as <code>GOOGLE_OAUTH_CLIENT_ID</code> — not the Extension ID
-              </p>
-              <div class="id-value-row">
-                <code class="id-value" id="oauth-client-id"></code>
-                <button type="button" class="copy-btn" data-copy-target="oauth-client-id">Copy</button>
-              </div>
-            </div>
-          </div>
-        </details>
-
         <form id="sheets-form">
-          <label class="toggle-row">
-            <span>Enable Google Sheets sync</span>
-            <input id="sheetsEnabled" type="checkbox" />
-          </label>
-
           <label class="field">
             <span class="field-label">Spreadsheet URL or ID</span>
             <input
@@ -500,25 +501,71 @@
           </label>
 
           <label class="toggle-row">
-            <span>Auto-upload after cache changes</span>
-            <input id="sheetsAutoSync" type="checkbox" checked />
-          </label>
-
-          <label class="toggle-row">
             <span>Download when explorer opens</span>
             <input id="sheetsPullOnLoad" type="checkbox" checked />
           </label>
 
           <div class="btn-group">
-            <button type="button" id="create-sheet-btn" class="btn btn-ghost">Create new spreadsheet</button>
+            <button type="button" id="pull-sheet-btn" class="btn btn-primary">Pull</button>
+            <button type="submit" class="btn btn-secondary">Save Sheets settings</button>
+          </div>
 
-            <div class="btn-row">
-              <button type="button" id="pull-sheet-btn" class="btn btn-secondary">Pull</button>
-              <button type="button" id="push-sheet-btn" class="btn btn-secondary" title="Requires Google sign-in (maintainer only)">Push</button>
+          <div id="own-sheet-entry" class="own-sheet-entry">
+            <span class="field-hint">
+              Maintainer? Connect your own Google Sheet to push or sync cache updates.
+            </span>
+            <button type="button" id="get-own-sheet-btn" class="btn btn-ghost">Get own sheet</button>
+          </div>
+
+          <div id="sheets-own-section" class="sheets-own-section hidden">
+            <p class="card-subtitle">Your Google Sheet (sign-in required)</p>
+
+            <p id="oauth-setup-warning" class="oauth-warning hidden"></p>
+
+            <details class="oauth-details">
+              <summary>OAuth setup IDs</summary>
+              <div class="oauth-body">
+                <div class="id-block">
+                  <p class="id-label">Extension ID</p>
+                  <p class="id-hint">Google Cloud → Clients → Chrome extension → Application ID</p>
+                  <div class="id-value-row">
+                    <code class="id-value" id="extension-id"></code>
+                    <button type="button" class="copy-btn" data-copy-target="extension-id">Copy</button>
+                  </div>
+                </div>
+                <div class="id-block">
+                  <p class="id-label">OAuth Client ID</p>
+                  <p class="id-hint">
+                    Put in <code>.env</code> as <code>GOOGLE_OAUTH_CLIENT_ID</code> — not the Extension ID
+                  </p>
+                  <div class="id-value-row">
+                    <code class="id-value" id="oauth-client-id"></code>
+                    <button type="button" class="copy-btn" data-copy-target="oauth-client-id">Copy</button>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <label class="toggle-row">
+              <span>Enable Google Sheets sync</span>
+              <input id="sheetsEnabled" type="checkbox" />
+            </label>
+
+            <label class="toggle-row">
+              <span>Auto-upload after cache changes</span>
+              <input id="sheetsAutoSync" type="checkbox" checked />
+            </label>
+
+            <div class="btn-group">
+              <button type="button" id="create-sheet-btn" class="btn btn-ghost">Create new spreadsheet</button>
+
+              <div class="btn-row">
+                <button type="button" id="push-sheet-btn" class="btn btn-secondary" title="Requires Google sign-in (maintainer only)">Push</button>
+                <button type="button" id="sync-sheet-btn" class="btn btn-secondary" title="Requires Google sign-in (maintainer only)">Sync both ways</button>
+              </div>
             </div>
 
-            <button type="button" id="sync-sheet-btn" class="btn btn-primary" title="Requires Google sign-in (maintainer only)">Sync both ways</button>
-            <button type="submit" class="btn btn-secondary">Save Sheets settings</button>
+            <button type="button" id="hide-own-sheet-btn" class="btn btn-ghost">Use community sheet only</button>
           </div>
         </form>
 
