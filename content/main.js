@@ -373,6 +373,19 @@ function isBurnRateKnown(data) {
   return Boolean(data && data.ownerIncentive != null);
 }
 
+function isRegFeeKnown(data) {
+  return Boolean(data && data.burnTao != null);
+}
+
+function isMinersCountKnown(data) {
+  const count = Number(data?.incentiveMinerCount);
+  return Number.isInteger(count) && count >= 0;
+}
+
+function needsSyncPriority(data) {
+  return !isBurnRateKnown(data) || !isRegFeeKnown(data) || !isMinersCountKnown(data);
+}
+
 function isFullBurnRate(value) {
   const n = Number(value);
   return Number.isFinite(n) && n >= 1 - 1e-9;
@@ -466,22 +479,22 @@ async function collectSyncAllNetuids() {
     }
   }
 
-  const unknownBurn = [];
-  const knownBurn = [];
+  const priority = [];
+  const complete = [];
 
   netuids.forEach((netuid) => {
     const data = metrics.get(netuid);
-    if (!data || !isBurnRateKnown(data)) {
-      unknownBurn.push(netuid);
+    if (needsSyncPriority(data)) {
+      priority.push(netuid);
     } else {
-      knownBurn.push(netuid);
+      complete.push(netuid);
     }
   });
 
-  unknownBurn.sort((a, b) => a - b);
-  knownBurn.sort((a, b) => a - b);
+  priority.sort((a, b) => a - b);
+  complete.sort((a, b) => a - b);
 
-  return [...unknownBurn, ...knownBurn];
+  return [...priority, ...complete];
 }
 
 function getMinersColumnWidth() {
@@ -681,7 +694,7 @@ function updateSyncButton(status) {
   }
 
   btn.title =
-    'Sync all subnets: unknown burn rates (grey —) first, then the rest';
+    'Sync all subnets: missing burn rate, reg fee, or miners first, then the rest';
 
   btn.disabled = false;
   btn.classList.remove('tao-analytics-sync-running');
@@ -701,7 +714,7 @@ function ensureSyncButton() {
     btn.type = 'button';
     btn.className = 'tao-analytics-sync-btn';
     btn.title =
-      'Sync all subnets: unknown burn rates (grey —) first, then the rest';
+      'Sync all subnets: missing burn rate, reg fee, or miners first, then the rest';
 
     btn.appendChild(buildSyncIcon());
     const label = document.createElement('span');
@@ -748,16 +761,16 @@ async function syncSingleSubnet(netuid) {
     return;
   }
 
-  const stored = await getLocalStorage(SYNC_STATUS_KEY);
-  if (stored?.[SYNC_STATUS_KEY]?.running) {
-    console.warn('[TAO Subnet Analytics] Sync already in progress');
-    return;
-  }
-
   rowSyncing.add(netuid);
-  scheduleTableEnhance();
+  updateRowSyncIndicator(netuid, true);
 
   try {
+    const stored = await getLocalStorage(SYNC_STATUS_KEY);
+    if (stored?.[SYNC_STATUS_KEY]?.running) {
+      console.warn('[TAO Subnet Analytics] Sync already in progress');
+      return;
+    }
+
     const response = await sendRuntimeMessage({
       type: MESSAGE.SYNC_SINGLE_SUBNET,
       netuid,
@@ -781,7 +794,32 @@ async function syncSingleSubnet(netuid) {
     console.warn('[TAO Subnet Analytics] Subnet sync failed:', error.message);
   } finally {
     rowSyncing.delete(netuid);
+    updateRowSyncIndicator(netuid, false);
     scheduleCacheEnhance();
+  }
+}
+
+function updateRowSyncIndicator(netuid, isSyncing) {
+  const tableInfo = findSubnetTable();
+  if (!tableInfo) {
+    return;
+  }
+
+  for (const row of tableInfo.table.querySelectorAll('tbody tr')) {
+    const cells = row.querySelectorAll('td');
+    const rowNetuid = parseNetuid(cells[tableInfo.snIdx]?.textContent);
+    if (rowNetuid !== netuid) {
+      continue;
+    }
+
+    const btn = row.querySelector(`.${COLUMN.BURN} .tao-analytics-row-sync-btn`);
+    if (!btn) {
+      return;
+    }
+
+    btn.disabled = isSyncing;
+    btn.classList.toggle('tao-analytics-sync-running', isSyncing);
+    return;
   }
 }
 
@@ -1600,6 +1638,51 @@ function findSubnetNavMountPoint() {
   return null;
 }
 
+function unwrapLegacySubnetNavLayout() {
+  const tabsCard = document.querySelector('.tao-analytics-subnet-tabs-card');
+  if (tabsCard?.parentElement) {
+    const parent = tabsCard.parentElement;
+    [...tabsCard.children].forEach((child) => {
+      parent.insertBefore(child, tabsCard);
+    });
+    tabsCard.remove();
+  }
+
+  const row = document.querySelector('.tao-analytics-subnet-nav-row');
+  if (!row?.parentElement) {
+    return;
+  }
+
+  const section = row.querySelector('.tao-analytics-subnet-nav-section');
+  if (section) {
+    row.parentElement.insertBefore(section, row);
+  }
+  row.remove();
+}
+
+function isSubnetNavigatorPlaced(mount, section) {
+  if (!section || !mount?.before || !mount?.parent) {
+    return false;
+  }
+
+  if (section.parentElement !== mount.parent) {
+    return false;
+  }
+
+  let node = section.nextSibling;
+  while (node) {
+    if (node === mount.before) {
+      return true;
+    }
+    if (node instanceof HTMLElement && node.classList.contains('tao-analytics-subnet-nav-section')) {
+      break;
+    }
+    node = node.nextSibling;
+  }
+
+  return section.nextSibling === mount.before;
+}
+
 function bindSubnetNavigator(nav) {
   if (nav.dataset.taoSubnetNavBound === '1') {
     return;
@@ -1663,6 +1746,9 @@ function updateSubnetNavigatorState(nav) {
 }
 
 function createSubnetNavigator() {
+  const section = document.createElement('div');
+  section.className = 'tao-analytics-subnet-nav-section';
+
   const nav = document.createElement('div');
   nav.className = 'tao-analytics-subnet-nav';
 
@@ -1688,12 +1774,29 @@ function createSubnetNavigator() {
   nextBtn.textContent = 'Next';
 
   nav.append(prevBtn, input, nextBtn);
+  section.append(nav);
   bindSubnetNavigator(nav);
-  return nav;
+  return section;
 }
 
+function wrapSubnetNavigatorSection(nav) {
+  if (!nav || nav.closest('.tao-analytics-subnet-nav-section')) {
+    return nav?.closest('.tao-analytics-subnet-nav-section') ?? nav;
+  }
+
+  const section = document.createElement('div');
+  section.className = 'tao-analytics-subnet-nav-section';
+  nav.parentElement?.insertBefore(section, nav);
+  section.appendChild(nav);
+  return section;
+}
+
+let subnetNavObserver = null;
+let subnetNavUrlWatch = null;
+let subnetNavIsMounting = false;
+
 function ensureSubnetNavigator() {
-  if (!isSubnetPage()) {
+  if (!isSubnetPage() || subnetNavIsMounting) {
     return;
   }
 
@@ -1702,19 +1805,45 @@ function ensureSubnetNavigator() {
     return;
   }
 
-  let nav = document.querySelector('.tao-analytics-subnet-nav');
-  if (!nav) {
-    nav = createSubnetNavigator();
-    mount.parent.insertBefore(nav, mount.before);
-  } else if (nav.parentElement !== mount.parent) {
-    mount.parent.insertBefore(nav, mount.before);
+  subnetNavIsMounting = true;
+  subnetNavObserver?.disconnect();
+
+  try {
+    unwrapLegacySubnetNavLayout();
+
+    let section = document.querySelector('.tao-analytics-subnet-nav-section');
+    let nav = section?.querySelector('.tao-analytics-subnet-nav') ?? null;
+
+    if (!nav) {
+      const orphanNav = document.querySelector('.tao-analytics-subnet-nav');
+      if (orphanNav) {
+        section = wrapSubnetNavigatorSection(orphanNav);
+        nav = orphanNav;
+      } else {
+        section = createSubnetNavigator();
+        nav = section.querySelector('.tao-analytics-subnet-nav');
+      }
+    }
+
+    if (section && !isSubnetNavigatorPlaced(mount, section)) {
+      mount.parent.insertBefore(section, mount.before);
+    }
+
+    section?.querySelector('.tao-analytics-subnet-nav-gap')?.remove();
+
+    if (nav) {
+      updateSubnetNavigatorState(nav);
+    }
+  } finally {
+    subnetNavIsMounting = false;
+    if (subnetNavObserver && isSubnetPage()) {
+      subnetNavObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+      });
+    }
   }
-
-  updateSubnetNavigatorState(nav);
 }
-
-let subnetNavObserver = null;
-let subnetNavUrlWatch = null;
 
 function teardownSubnetNavigator() {
   if (subnetNavObserver) {
@@ -1732,20 +1861,31 @@ function initSubnetNavigator() {
     return;
   }
 
-  const tryMount = () => {
-    ensureSubnetNavigator();
+  unwrapLegacySubnetNavLayout();
+
+  let mountTimer = null;
+  const scheduleMount = () => {
+    if (mountTimer) {
+      clearTimeout(mountTimer);
+    }
+    mountTimer = setTimeout(() => {
+      mountTimer = null;
+      if (!document.querySelector('.tao-analytics-subnet-nav')) {
+        ensureSubnetNavigator();
+      }
+    }, 120);
   };
 
-  tryMount();
+  ensureSubnetNavigator();
 
-  subnetNavObserver = new MutationObserver(tryMount);
+  subnetNavObserver = new MutationObserver(scheduleMount);
   subnetNavObserver.observe(document.documentElement, { childList: true, subtree: true });
 
   let lastHref = location.href;
   subnetNavUrlWatch = setInterval(() => {
     if (location.href !== lastHref) {
       lastHref = location.href;
-      tryMount();
+      ensureSubnetNavigator();
     }
   }, 400);
 

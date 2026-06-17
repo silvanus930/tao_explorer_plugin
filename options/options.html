@@ -477,6 +477,33 @@
       </section>
 
       <section class="card">
+        <h2 class="card-title">Cache backup</h2>
+        <p class="card-desc">
+          Download subnet metrics as JSON, or import a backup file into this browser.
+          Merge keeps newer per-subnet data; replace overwrites the local cache.
+        </p>
+
+        <div class="btn-group">
+          <button type="button" id="export-cache-btn" class="btn btn-secondary">Download cache</button>
+          <button type="button" id="import-cache-btn" class="btn btn-secondary">Import from file</button>
+        </div>
+
+        <input
+          id="import-cache-file"
+          type="file"
+          accept=".json,application/json"
+          class="hidden"
+        />
+
+        <label class="toggle-row">
+          <span>Replace local cache on import</span>
+          <input id="import-cache-replace" type="checkbox" />
+        </label>
+
+        <div id="cache-status" class="status-bar" role="status"></div>
+      </section>
+
+      <section class="card">
         <h2 class="card-title">Google Sheets sync</h2>
         <p class="card-desc">
           Pull burn/reg fee cache from the community sheet — no Google sign-in required.

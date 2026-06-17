@@ -22,6 +22,11 @@ const ownSheetEntry = document.getElementById('own-sheet-entry');
 const sheetsOwnSection = document.getElementById('sheets-own-section');
 const getOwnSheetBtn = document.getElementById('get-own-sheet-btn');
 const hideOwnSheetBtn = document.getElementById('hide-own-sheet-btn');
+const exportCacheBtn = document.getElementById('export-cache-btn');
+const importCacheBtn = document.getElementById('import-cache-btn');
+const importCacheFile = document.getElementById('import-cache-file');
+const importCacheReplace = document.getElementById('import-cache-replace');
+const cacheStatus = document.getElementById('cache-status');
 
 let ownSheetControlsVisible = false;
 
@@ -156,6 +161,87 @@ function setStatus(message, isError = false) {
   status.textContent = message;
   status.classList.toggle('error', isError);
 }
+
+function setCacheStatus(message, isError = false) {
+  if (!cacheStatus) {
+    return;
+  }
+
+  cacheStatus.textContent = message;
+  cacheStatus.classList.toggle('error', isError);
+}
+
+async function sendRuntimeMessage(type, extra = {}) {
+  return chrome.runtime.sendMessage({ type, ...extra });
+}
+
+exportCacheBtn?.addEventListener('click', async () => {
+  setCacheStatus('Preparing download…');
+
+  try {
+    const response = await sendRuntimeMessage('CACHE_EXPORT');
+    if (response?.error) {
+      throw new Error(response.error);
+    }
+
+    const payload = response.payload ?? response;
+    const subnetCount =
+      payload.subnetCount ?? Object.keys(payload.value || {}).length;
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `tao-subnet-cache-${stamp}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+
+    setCacheStatus(`Downloaded ${subnetCount} subnet${subnetCount === 1 ? '' : 's'}.`);
+  } catch (error) {
+    setCacheStatus(error.message || 'Export failed.', true);
+  }
+});
+
+importCacheBtn?.addEventListener('click', () => {
+  importCacheFile?.click();
+});
+
+importCacheFile?.addEventListener('change', async () => {
+  const file = importCacheFile.files?.[0];
+  importCacheFile.value = '';
+
+  if (!file) {
+    return;
+  }
+
+  setCacheStatus(`Reading ${file.name}…`);
+
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const response = await sendRuntimeMessage('CACHE_IMPORT', {
+      payload: parsed,
+      replace: importCacheReplace?.checked === true,
+    });
+
+    if (response?.error) {
+      throw new Error(response.error);
+    }
+
+    if (!response?.ok) {
+      throw new Error('Import failed.');
+    }
+
+    const modeLabel = response.mode === 'replace' ? 'replaced' : 'merged';
+    setCacheStatus(
+      `Imported ${response.importedCount ?? 0} subnet${response.importedCount === 1 ? '' : 's'} (${modeLabel}). Cache now has ${response.subnetCount ?? 0} subnets.`,
+    );
+  } catch (error) {
+    setCacheStatus(error.message || 'Import failed.', true);
+  }
+});
 
 async function loadSettings() {
   const stored = await chrome.storage.sync.get({

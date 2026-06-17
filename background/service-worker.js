@@ -17,6 +17,7 @@ importScripts(
   '../api/rpcClient.js',
   '../api/taoClient.js',
   '../api/sheetsSync.js',
+  '../api/cacheFile.js',
   '../storage/cache.js'
 );
 
@@ -38,6 +39,8 @@ const MESSAGE = {
   SHEETS_SYNC: 'SHEETS_SYNC',
   SHEETS_CREATE: 'SHEETS_CREATE',
   SHEETS_PULL_IF_ENABLED: 'SHEETS_PULL_IF_ENABLED',
+  CACHE_EXPORT: 'CACHE_EXPORT',
+  CACHE_IMPORT: 'CACHE_IMPORT',
 };
 
 let refreshPromise = null;
@@ -602,6 +605,34 @@ async function runSheetsSync({ interactive = true } = {}) {
   };
 }
 
+async function exportCacheToFile() {
+  const cache = await getCache();
+  const meta = await getCacheMeta();
+  return buildCacheExportPayload(cache, meta, chrome.runtime.getManifest().version);
+}
+
+async function importCacheFromFile(payload, { replace = false } = {}) {
+  const remoteMap = normalizeImportedCacheMap(payload);
+  if (!remoteMap) {
+    return { ok: false, error: 'Invalid cache file format' };
+  }
+
+  const settings = await getSettings();
+  const ttl = Math.max(1, settings.refreshMinutes) * 60 * 1000;
+  const localMap = await getCache();
+  const merged = replace ? remoteMap : mergeCacheMaps(localMap, remoteMap);
+
+  await setCache(merged, ttl);
+  await notifyExplorerRefresh();
+
+  return {
+    ok: true,
+    subnetCount: Object.keys(merged).length,
+    importedCount: Object.keys(remoteMap).length,
+    mode: replace ? 'replace' : 'merge',
+  };
+}
+
 async function runSheetsPullIfEnabled() {
   const sheets = await getSheetsSettings();
   if (!sheets.spreadsheetId || !sheets.pullOnLoad) {
@@ -909,6 +940,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
       case MESSAGE.SHEETS_PULL_IF_ENABLED: {
         return runSheetsPullIfEnabled();
+      }
+
+      case MESSAGE.CACHE_EXPORT: {
+        const payload = await exportCacheToFile();
+        return { ok: true, payload };
+      }
+
+      case MESSAGE.CACHE_IMPORT: {
+        return importCacheFromFile(message.payload, {
+          replace: Boolean(message.replace),
+        });
       }
 
       default:
