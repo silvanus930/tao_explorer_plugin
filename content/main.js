@@ -829,18 +829,32 @@ function setSortableHeaderLabel(button, label) {
     return;
   }
 
-  const svg = button.querySelector?.('svg') ?? null;
-  [...button.childNodes].forEach((node) => {
-    if (node !== svg) {
-      node.remove();
-    }
-  });
-
-  if (svg) {
-    button.insertBefore(document.createTextNode(label), svg);
-  } else {
+  const svg = button.querySelector('svg');
+  if (!svg) {
     button.textContent = label;
+    return;
   }
+
+  const insertParent = svg.parentElement;
+  if (!insertParent) {
+    button.textContent = label;
+    return;
+  }
+
+  const removeTextNodes = (root) => {
+    [...root.childNodes].forEach((node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        node.remove();
+      }
+    });
+  };
+
+  removeTextNodes(button);
+  if (insertParent !== button) {
+    removeTextNodes(insertParent);
+  }
+
+  insertParent.insertBefore(document.createTextNode(label), svg);
 }
 
 function buildSortableHeaderContent(label, referenceTh) {
