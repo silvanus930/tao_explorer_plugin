@@ -353,18 +353,113 @@ async function createSpreadsheet(token, title = 'TAO Subnet Analytics Cache') {
   };
 }
 
-async function readPublicCacheMap(spreadsheetId) {
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+
+    if (inQuotes) {
+      if (char === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += char;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inQuotes = true;
+    } else if (char === ',') {
+      row.push(field);
+      field = '';
+    } else if (char === '\n' || char === '\r') {
+      if (char === '\r' && text[i + 1] === '\n') {
+        i += 1;
+      }
+      row.push(field);
+      field = '';
+      if (row.some((value) => value !== '')) {
+        rows.push(row);
+      }
+      row = [];
+    } else {
+      field += char;
+    }
+  }
+
+  if (field || row.length) {
+    row.push(field);
+    if (row.some((value) => value !== '')) {
+      rows.push(row);
+    }
+  }
+
+  return rows;
+}
+
+function filterPublicDataRows(rows = []) {
+  return rows.filter((row, index) => {
+    if (index === 0 && String(row[0]).toLowerCase() === 'netuid') {
+      return false;
+    }
+    return row.some((value) => value !== '' && value != null);
+  });
+}
+
+async function fetchPublicSheetText(url) {
+  const response = await fetch(url, {
+    method: 'GET',
+    cache: 'no-store',
+    redirect: 'follow',
+    credentials: 'omit',
+  });
+
+  const text = await response.text();
+  return { response, text };
+}
+
+function formatPublicPullError(spreadsheetId, error) {
+  const message = String(error?.message || error || 'Public sheet pull failed');
+
+  if (/failed to fetch|networkerror|network error/i.test(message)) {
+    return [
+      `Could not reach Google Sheets (ID: ${spreadsheetId}).`,
+      'This is usually network, VPN, firewall, or an ad blocker — not sheet sharing.',
+      'Try: disable blockers for docs.google.com, check your connection, reload the extension at chrome://extensions, then Pull again.',
+    ].join(' ');
+  }
+
+  if (/http 40[13]|forbidden|permission|access denied/i.test(message)) {
+    return `${message} Share the sheet as "Anyone with the link → Viewer".`;
+  }
+
+  if (/parse|tab name/i.test(message)) {
+    return `${message} The maintainer sheet needs a tab named ${SHEET_TAB}.`;
+  }
+
+  return message;
+}
+
+async function readPublicCacheMapViaGviz(spreadsheetId) {
   const sheet = encodeURIComponent(SHEET_TAB);
   const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:json&sheet=${sheet}&headers=1`;
+  const { response, text } = await fetchPublicSheetText(url);
 
-  const response = await fetch(url);
   if (!response.ok) {
     throw new Error(
       `Public sheet read failed (HTTP ${response.status}). Share as "Anyone with the link can view".`
     );
   }
 
-  const text = await response.text();
   let payload = null;
 
   try {
@@ -387,14 +482,52 @@ async function readPublicCacheMap(spreadsheetId) {
     });
   });
 
-  const dataRows = rawRows.filter((row, index) => {
-    if (index === 0 && String(row[0]).toLowerCase() === 'netuid') {
-      return false;
-    }
-    return row.some((value) => value !== '' && value != null);
-  });
+  return rowsToCacheMap(filterPublicDataRows(rawRows));
+}
 
-  return rowsToCacheMap(dataRows);
+async function readPublicCacheMapViaCsv(spreadsheetId) {
+  const sheet = encodeURIComponent(SHEET_TAB);
+  const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&sheet=${sheet}`;
+  const { response, text } = await fetchPublicSheetText(url);
+
+  if (!response.ok) {
+    throw new Error(
+      `Public sheet CSV export failed (HTTP ${response.status}). Share as "Anyone with the link can view".`
+    );
+  }
+
+  if (!text || /<html/i.test(text)) {
+    throw new Error('Public sheet CSV export returned an unexpected page. Check the sheet URL and sharing.');
+  }
+
+  return rowsToCacheMap(filterPublicDataRows(parseCsv(text)));
+}
+
+async function readPublicCacheMap(spreadsheetId) {
+  const id = parseSpreadsheetId(spreadsheetId) || String(spreadsheetId || '').trim();
+  if (!id) {
+    throw new Error('Enter a valid Google Sheets URL or spreadsheet ID');
+  }
+
+  let gvizError = null;
+
+  try {
+    return await readPublicCacheMapViaGviz(id);
+  } catch (error) {
+    gvizError = error;
+    const retryable = /failed to fetch|networkerror|network error/i.test(
+      String(error?.message || error || '')
+    );
+    if (!retryable) {
+      throw error;
+    }
+  }
+
+  try {
+    return await readPublicCacheMapViaCsv(id);
+  } catch (csvError) {
+    throw new Error(formatPublicPullError(id, csvError || gvizError));
+  }
 }
 
 async function pullCacheFromPublicSheet(spreadsheetId) {
@@ -422,9 +555,7 @@ async function pullCacheFromSheets(spreadsheetId, { interactive = true, preferPu
     try {
       return await pullCacheFromPublicSheet(spreadsheetId);
     } catch (publicError) {
-      const hint =
-        ' Pull uses the public view link only (no Google sign-in). Ask the maintainer to share the sheet as "Anyone with the link → Viewer".';
-      throw new Error(`${publicError.message}${hint}`);
+      throw new Error(formatPublicPullError(id, publicError));
     }
   }
 
