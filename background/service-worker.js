@@ -51,10 +51,19 @@ const SYNC_STATUS_KEY = 'subnetSyncStatus';
 const TRACKING_NETUID_MAX = 256;
 const SCRAPE_WAIT_MS = 8_000;
 const SCRAPE_READY_TIMEOUT_MS = 30_000;
+const SCRAPE_WINDOW_IDLE_CLOSE_MS = 120_000;
 const ABORT_POLL_MS = 200;
 
+function subnetPageUrl(netuid, activeTab = 'metagraph') {
+  const base = `https://www.tao.app/subnets/${netuid}`;
+  if (!activeTab) {
+    return base;
+  }
+  return `${base}?active_tab=${encodeURIComponent(activeTab)}`;
+}
+
 function subnetMetagraphUrl(netuid) {
-  return `https://www.tao.app/subnets/${netuid}?active_tab=metagraph`;
+  return subnetPageUrl(netuid, 'metagraph');
 }
 
 function hrefMatchesScrapeTab(href, scrapeTab) {
@@ -67,9 +76,24 @@ function hrefMatchesScrapeTab(href, scrapeTab) {
 
 let scrapeWindowId = null;
 let scrapeMetagraphTabId = null;
+let scrapeWindowCloseTimer = null;
+
+function needsTopMinerEmissionsScrape(entry) {
+  const count = Number(entry?.incentiveMinerCount);
+  if (!Number.isInteger(count) || count <= 0) {
+    return false;
+  }
+
+  const emissions = entry?.topMinerEmissions;
+  return !Array.isArray(emissions) || emissions.length === 0;
+}
 
 function needsMetagraphScrape(entry) {
   if (needsIncentiveMinerCount(entry)) {
+    return true;
+  }
+
+  if (needsTopMinerEmissionsScrape(entry)) {
     return true;
   }
 
@@ -283,6 +307,11 @@ async function ensureMetagraphScrapeTab() {
 }
 
 async function closeScrapeWindow() {
+  if (scrapeWindowCloseTimer) {
+    clearTimeout(scrapeWindowCloseTimer);
+    scrapeWindowCloseTimer = null;
+  }
+
   if (scrapeWindowId == null) {
     scrapeMetagraphTabId = null;
     return;
@@ -296,6 +325,28 @@ async function closeScrapeWindow() {
 
   scrapeWindowId = null;
   scrapeMetagraphTabId = null;
+}
+
+function scheduleScrapeWindowClose(delayMs = SCRAPE_WINDOW_IDLE_CLOSE_MS) {
+  if (scrapeWindowCloseTimer) {
+    clearTimeout(scrapeWindowCloseTimer);
+  }
+
+  scrapeWindowCloseTimer = setTimeout(async () => {
+    scrapeWindowCloseTimer = null;
+    if (syncPromise) {
+      scheduleScrapeWindowClose(delayMs);
+      return;
+    }
+    await closeScrapeWindow();
+  }, delayMs);
+}
+
+function cancelScrapeWindowClose() {
+  if (scrapeWindowCloseTimer) {
+    clearTimeout(scrapeWindowCloseTimer);
+    scrapeWindowCloseTimer = null;
+  }
 }
 
 async function notifyExplorerRefresh() {
@@ -318,7 +369,10 @@ async function scrapeUrlInTab(tabId, url, netuid, scrapeTab = null) {
     return false;
   }
 
+  cancelScrapeWindowClose();
+
   try {
+    // Same navigation model as subnet Prev/Next: one tab, update URL in place.
     await chrome.tabs.update(tabId, { url, active: false });
     await waitForTabComplete(tabId, 25_000);
     if (syncAbort) {
@@ -385,7 +439,7 @@ async function runSyncSingle(netuid) {
   if (!syncAbort) {
     await scrapeSubnetInHiddenTab(id, { metagraph: true });
   }
-  await closeScrapeWindow();
+  scheduleScrapeWindowClose();
   await notifyExplorerRefresh();
   await runSheetsPush({ interactive: false }).catch(() => {});
 
@@ -447,7 +501,7 @@ async function runSyncAll(netuids) {
     finishedAt: Date.now(),
   });
 
-  await closeScrapeWindow();
+  scheduleScrapeWindowClose();
   await notifyExplorerRefresh();
   await runSheetsPush({ interactive: false }).catch(() => {});
 }

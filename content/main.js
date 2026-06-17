@@ -27,10 +27,13 @@ const COLUMN = {
 const COLUMN_WIDTH = {
   burn: 96,
   fee: 88,
-  miners: 52,
 };
 
+const COLUMN_WIDTH_MINERS_EXPANDED = 200;
+const MINERS_EMISSIONS_PREF_KEY = 'showMinerEmissions';
+
 const MINER_COUNT_DISPLAY_CAP = 40;
+const SUBNET_NETUID_MAX = 256;
 
 const STORAGE_CACHE_KEY = 'subnetMetricsCache';
 const SYNC_STATUS_KEY = 'subnetSyncStatus';
@@ -50,6 +53,12 @@ let globalSyncNetuid = null;
 let headerSortObserver = null;
 let observedSortThead = null;
 let columnSortState = { key: null, direction: null };
+let columnDragState = null;
+let columnOrderObserver = null;
+let observedColumnOrderRow = null;
+let showMinerEmissions = false;
+
+const ANALYTICS_COLUMN_CLASSES = [COLUMN.BURN, COLUMN.FEE, COLUMN.MINERS];
 
 function isAnalyticsSortHeader(th) {
   return Boolean(
@@ -78,19 +87,25 @@ function resetAnalyticsSortHeaderUi(tableInfo) {
 
   if (burnHeader && refTh) {
     burnHeader.dataset.taoAnalyticsSort = 'burn';
-    burnHeader.replaceChildren(buildSortableHeaderContent('Burn Rate', refTh));
+    burnHeader.replaceChildren(...buildSortableHeaderContent('Burn Rate', refTh));
+    ensureMoveButtonOnHeader(burnHeader, refTh);
+    wrapAnalyticsHeaderContent(burnHeader);
     burnHeader.removeAttribute('aria-sort');
   }
 
   if (feeHeader && refTh) {
     feeHeader.dataset.taoAnalyticsSort = 'fee';
-    feeHeader.replaceChildren(buildSortableHeaderContent('Reg. Fee', refTh));
+    feeHeader.replaceChildren(...buildSortableHeaderContent('Reg. Fee', refTh));
+    ensureMoveButtonOnHeader(feeHeader, refTh);
+    wrapAnalyticsHeaderContent(feeHeader);
     feeHeader.removeAttribute('aria-sort');
   }
 
   if (minersHeader && refTh) {
     minersHeader.dataset.taoAnalyticsSort = 'miners';
-    minersHeader.replaceChildren(buildSortableHeaderContent('Miners', refTh));
+    minersHeader.replaceChildren(...buildSortableHeaderContent('Miners', refTh));
+    ensureMoveButtonOnHeader(minersHeader, refTh);
+    wrapAnalyticsHeaderContent(minersHeader);
     minersHeader.removeAttribute('aria-sort');
   }
 }
@@ -469,6 +484,148 @@ async function collectSyncAllNetuids() {
   return [...unknownBurn, ...knownBurn];
 }
 
+function getMinersColumnWidth() {
+  return showMinerEmissions ? COLUMN_WIDTH_MINERS_EXPANDED : COLUMN_WIDTH.fee;
+}
+
+function shouldShowMinerEmissions() {
+  return showMinerEmissions;
+}
+
+async function loadMinerEmissionsPreference() {
+  const stored = await getLocalStorage(MINERS_EMISSIONS_PREF_KEY);
+  showMinerEmissions = Boolean(stored?.[MINERS_EMISSIONS_PREF_KEY]);
+  document.documentElement.dataset.taoAnalyticsMinerEmissions = showMinerEmissions ? 'on' : 'off';
+}
+
+async function setMinerEmissionsVisible(enabled) {
+  showMinerEmissions = Boolean(enabled);
+  document.documentElement.dataset.taoAnalyticsMinerEmissions = showMinerEmissions ? 'on' : 'off';
+  await setLocalStorage({ [MINERS_EMISSIONS_PREF_KEY]: showMinerEmissions });
+  syncMinerEmissionsToggleUi();
+  applyMinersColumnWidth();
+  scheduleTableEnhance();
+}
+
+function findActiveOnlyContainer() {
+  const switchBtn = document.getElementById('desktop-active-only');
+  if (switchBtn?.parentElement instanceof HTMLElement) {
+    return switchBtn.parentElement;
+  }
+
+  for (const label of document.querySelectorAll('label[data-slot="label"], label')) {
+    if (normalizeText(label.textContent) !== 'Active Only') {
+      continue;
+    }
+
+    const container = label.parentElement;
+    if (container?.querySelector('[role="switch"]')) {
+      return container;
+    }
+  }
+
+  for (const switchEl of document.querySelectorAll('[role="switch"]')) {
+    const container = switchEl.parentElement;
+    if (container && /active only/i.test(container.textContent)) {
+      return container;
+    }
+  }
+
+  return null;
+}
+
+function applyMinerEmissionsSwitchState(switchBtn, checked) {
+  if (!switchBtn) {
+    return;
+  }
+
+  const state = checked ? 'checked' : 'unchecked';
+  switchBtn.setAttribute('aria-checked', checked ? 'true' : 'false');
+  switchBtn.dataset.state = state;
+  switchBtn.value = checked ? 'on' : 'off';
+
+  const thumb = switchBtn.querySelector('span');
+  if (thumb) {
+    thumb.dataset.state = state;
+  }
+}
+
+function syncMinerEmissionsToggleUi() {
+  const switchBtn = document.getElementById('tao-analytics-miner-emissions-switch');
+  applyMinerEmissionsSwitchState(switchBtn, showMinerEmissions);
+}
+
+function buildMinerEmissionsToggle() {
+  const activeOnlyContainer = findActiveOnlyContainer();
+  const refLabel = activeOnlyContainer?.querySelector('label[data-slot="label"], label');
+  const refSwitch = activeOnlyContainer?.querySelector('[role="switch"]');
+  const refThumb = refSwitch?.querySelector('span');
+
+  const wrapper = document.createElement('div');
+  wrapper.id = 'tao-analytics-miner-emissions-toggle';
+  wrapper.className = activeOnlyContainer?.className || 'ml-4 flex items-center gap-2';
+
+  const label = document.createElement('label');
+  label.dataset.slot = 'label';
+  label.htmlFor = 'tao-analytics-miner-emissions-switch';
+  label.className =
+    refLabel?.className ||
+    'flex items-center gap-2 font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50 text-muted-foreground cursor-pointer text-[11px]';
+  label.textContent = 'Miner Emissions';
+
+  const switchBtn = document.createElement('button');
+  switchBtn.type = 'button';
+  switchBtn.id = 'tao-analytics-miner-emissions-switch';
+  switchBtn.setAttribute('role', 'switch');
+  switchBtn.className =
+    refSwitch?.className ||
+    'peer focus-visible:ring-ring focus-visible:ring-offset-background data-[state=checked]:bg-primary data-[state=unchecked]:bg-input inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 border-transparent transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50';
+  switchBtn.title = 'Show top 3 miner emissions in the Miners column';
+
+  const thumb = document.createElement('span');
+  thumb.className =
+    refThumb?.className ||
+    'bg-background pointer-events-none block h-5 w-5 rounded-full shadow-lg ring-0 transition-transform data-[state=checked]:translate-x-5 data-[state=unchecked]:translate-x-0';
+  switchBtn.appendChild(thumb);
+
+  const toggleMinerEmissions = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void setMinerEmissionsVisible(!showMinerEmissions);
+  };
+
+  switchBtn.addEventListener('click', toggleMinerEmissions);
+
+  wrapper.append(label, switchBtn);
+  syncMinerEmissionsToggleUi();
+  return wrapper;
+}
+
+function ensureMinerEmissionsToggle() {
+  const activeOnlyContainer = findActiveOnlyContainer();
+  if (!activeOnlyContainer?.parentElement) {
+    return;
+  }
+
+  let toggle = document.getElementById('tao-analytics-miner-emissions-toggle');
+  if (!toggle) {
+    toggle = buildMinerEmissionsToggle();
+    activeOnlyContainer.parentElement.insertBefore(toggle, activeOnlyContainer.nextSibling);
+    return;
+  }
+
+  syncMinerEmissionsToggleUi();
+}
+
+function applyMinersColumnWidth() {
+  const tableInfo = findSubnetTable();
+  if (!tableInfo) {
+    return;
+  }
+
+  syncAnalyticsColumnWidths(tableInfo);
+}
+
 function findExplorerToolbarAnchor() {
   const deregBtn = [...document.querySelectorAll('button')].find((btn) =>
     /^dereg$/i.test(normalizeText(btn.textContent))
@@ -764,9 +921,10 @@ function findMetagraphTable() {
     const headers = headerCells.map((cell) => normalizeText(cell.textContent));
     const uidIdx = headers.findIndex((label) => label === 'UID');
     const incentiveIdx = headers.findIndex((label) => /^incentive$/i.test(label));
+    const emissionIdx = headers.findIndex((label) => /^emission$/i.test(label));
 
     if (uidIdx >= 0 && incentiveIdx >= 0) {
-      return { table, headers, uidIdx, incentiveIdx };
+      return { table, headers, uidIdx, incentiveIdx, emissionIdx };
     }
   }
 
@@ -1052,6 +1210,70 @@ function collectPositiveIncentiveUidsFromMetagraphPage(tableInfo) {
   return positiveUids;
 }
 
+function parseEmissionCellValue(text) {
+  const normalized = normalizeText(text);
+  if (!normalized || normalized === '—' || normalized === '-') {
+    return null;
+  }
+
+  const value = parseMoneyLikeNumber(normalized) ?? Number(normalized.replace(/,/g, ''));
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function formatTopMinerEmission(value) {
+  if (!Number.isFinite(value)) {
+    return '—';
+  }
+
+  if (value >= 10) {
+    return (Math.round(value * 10) / 10).toFixed(1);
+  }
+
+  return (Math.round(value * 100) / 100).toFixed(2);
+}
+
+function collectTopMinerEmissionsFromMetagraphPage(tableInfo, limit = 3) {
+  if (tableInfo.emissionIdx < 0) {
+    return [];
+  }
+
+  const emissions = [];
+
+  for (const row of tableInfo.table.querySelectorAll('tbody tr')) {
+    if (isMetagraphOwnerMinerRow(row, tableInfo)) {
+      continue;
+    }
+
+    const cells = [...row.querySelectorAll('td')];
+    const incentive = parseIncentiveCellValue(cells[tableInfo.incentiveIdx]?.textContent);
+    if (incentive == null || incentive <= 0) {
+      continue;
+    }
+
+    const emission = parseEmissionCellValue(cells[tableInfo.emissionIdx]?.textContent);
+    if (emission == null) {
+      continue;
+    }
+
+    emissions.push(emission);
+    if (emissions.length >= limit) {
+      break;
+    }
+  }
+
+  return emissions;
+}
+
+function topMinerEmissionsEqual(left, right) {
+  const a = Array.isArray(left) ? left : [];
+  const b = Array.isArray(right) ? right : [];
+  if (a.length !== b.length) {
+    return false;
+  }
+
+  return a.every((value, index) => Number(value) === Number(b[index]));
+}
+
 async function collectIncentiveMinerCountFromMetagraphTable() {
   let tableInfo = await prepareMetagraphTableForScrape();
   if (!tableInfo) {
@@ -1060,6 +1282,7 @@ async function collectIncentiveMinerCountFromMetagraphTable() {
 
   tableInfo = await goToMetagraphFirstPage(tableInfo);
 
+  const topEmissions = collectTopMinerEmissionsFromMetagraphPage(tableInfo, 3);
   const positiveUids = new Set();
   let pages = 0;
 
@@ -1099,7 +1322,10 @@ async function collectIncentiveMinerCountFromMetagraphTable() {
     pages += 1;
   }
 
-  return positiveUids.size;
+  return {
+    count: positiveUids.size,
+    topEmissions,
+  };
 }
 
 function collectOwnerIncentiveFromDom() {
@@ -1236,6 +1462,296 @@ function isAboutSubnetTab() {
   return activeTab == null || activeTab === 'about';
 }
 
+const SUBNET_TAB_LABELS = new Set([
+  'About',
+  'Social',
+  'Metagraph',
+  'Hyperparams',
+  'Liquidity',
+  'Holders',
+  'Transactions',
+  'Volume',
+]);
+
+function buildSubnetPageQuery() {
+  const activeTab = new URLSearchParams(location.search).get('active_tab');
+  if (!activeTab) {
+    return '';
+  }
+  return `?active_tab=${encodeURIComponent(activeTab)}`;
+}
+
+function buildSubnetPageUrl(netuid) {
+  const id = Number(netuid);
+  if (!Number.isInteger(id) || id < 0 || id > SUBNET_NETUID_MAX) {
+    return null;
+  }
+  return `${location.origin}/subnets/${id}${buildSubnetPageQuery()}`;
+}
+
+function navigateToSubnet(netuid, { newTab = false } = {}) {
+  const url = buildSubnetPageUrl(netuid);
+  if (!url) {
+    return false;
+  }
+
+  if (newTab) {
+    window.open(url, '_blank', 'noopener');
+    return true;
+  }
+
+  if (url === location.href) {
+    return false;
+  }
+
+  location.href = url;
+  return true;
+}
+
+function parseSubnetInputValue(input) {
+  const value = Number(input?.value);
+  if (!Number.isInteger(value) || value < 0 || value > SUBNET_NETUID_MAX) {
+    return null;
+  }
+  return value;
+}
+
+function resolveSubnetNavTarget(direction, input, currentNetuid) {
+  const inputValue = parseSubnetInputValue(input);
+  const inputDiffers = inputValue != null && inputValue !== currentNetuid;
+
+  if (direction === 'next') {
+    if (inputDiffers) {
+      return inputValue;
+    }
+    if (currentNetuid != null && currentNetuid < SUBNET_NETUID_MAX) {
+      return currentNetuid + 1;
+    }
+    return null;
+  }
+
+  if (inputDiffers) {
+    return inputValue > 0 ? inputValue - 1 : null;
+  }
+  if (currentNetuid != null && currentNetuid > 0) {
+    return currentNetuid - 1;
+  }
+  return null;
+}
+
+function bindSubnetNavButton(button, direction, input) {
+  const go = (newTab) => {
+    const target = resolveSubnetNavTarget(direction, input, getNetuidFromPath());
+    if (target == null) {
+      return;
+    }
+    navigateToSubnet(target, { newTab });
+  };
+
+  button.addEventListener('click', () => {
+    go(false);
+  });
+
+  button.addEventListener('auxclick', (event) => {
+    if (event.button !== 1) {
+      return;
+    }
+    event.preventDefault();
+    go(true);
+  });
+
+  button.addEventListener('mousedown', (event) => {
+    if (event.button === 1) {
+      event.preventDefault();
+    }
+  });
+}
+
+function findSubnetNavMountPoint() {
+  for (const parent of document.querySelectorAll('div, nav')) {
+    const directTabs = [...parent.children].filter((child) => {
+      if (!(child instanceof HTMLElement)) {
+        return false;
+      }
+
+      const link = child.matches('a, button')
+        ? child
+        : child.querySelector(':scope > a, :scope > button');
+
+      if (!link) {
+        return false;
+      }
+
+      return SUBNET_TAB_LABELS.has(normalizeText(link.textContent));
+    });
+
+    if (directTabs.length >= 3) {
+      return { parent, before: directTabs[0] };
+    }
+  }
+
+  const aboutTab = [...document.querySelectorAll('a, button')].find(
+    (el) => normalizeText(el.textContent) === 'About',
+  );
+  if (aboutTab?.parentElement) {
+    return { parent: aboutTab.parentElement, before: aboutTab };
+  }
+
+  return null;
+}
+
+function bindSubnetNavigator(nav) {
+  if (nav.dataset.taoSubnetNavBound === '1') {
+    return;
+  }
+  nav.dataset.taoSubnetNavBound = '1';
+
+  const input = nav.querySelector('.tao-analytics-subnet-nav-input');
+  const prevBtn = nav.querySelector('[data-action="prev"]');
+  const nextBtn = nav.querySelector('[data-action="next"]');
+
+  if (prevBtn) {
+    bindSubnetNavButton(prevBtn, 'prev', input);
+  }
+  if (nextBtn) {
+    bindSubnetNavButton(nextBtn, 'next', input);
+  }
+
+  input?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') {
+      return;
+    }
+    event.preventDefault();
+    const value = parseSubnetInputValue(input);
+    if (value != null) {
+      navigateToSubnet(value);
+    }
+  });
+
+  input?.addEventListener('input', () => {
+    updateSubnetNavigatorState(nav);
+  });
+}
+
+function updateSubnetNavigatorState(nav) {
+  const netuid = getNetuidFromPath();
+  const input = nav.querySelector('.tao-analytics-subnet-nav-input');
+  const prevBtn = nav.querySelector('[data-action="prev"]');
+  const nextBtn = nav.querySelector('[data-action="next"]');
+  const inputValue = parseSubnetInputValue(input);
+  const inputDiffers = inputValue != null && inputValue !== netuid;
+
+  if (input && netuid != null && document.activeElement !== input) {
+    input.value = String(netuid);
+  }
+
+  if (prevBtn) {
+    if (inputDiffers) {
+      prevBtn.disabled = inputValue <= 0;
+    } else {
+      prevBtn.disabled = netuid == null || netuid <= 0;
+    }
+  }
+
+  if (nextBtn) {
+    if (inputDiffers) {
+      nextBtn.disabled = false;
+    } else {
+      nextBtn.disabled = netuid == null || netuid >= SUBNET_NETUID_MAX;
+    }
+  }
+}
+
+function createSubnetNavigator() {
+  const nav = document.createElement('div');
+  nav.className = 'tao-analytics-subnet-nav';
+
+  const prevBtn = document.createElement('button');
+  prevBtn.type = 'button';
+  prevBtn.className = 'tao-analytics-subnet-nav-btn';
+  prevBtn.dataset.action = 'prev';
+  prevBtn.textContent = 'Prev';
+
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.className = 'tao-analytics-subnet-nav-input';
+  input.min = '0';
+  input.max = String(SUBNET_NETUID_MAX);
+  input.inputMode = 'numeric';
+  input.placeholder = 'SN';
+  input.title = 'Subnet number (Enter to go)';
+
+  const nextBtn = document.createElement('button');
+  nextBtn.type = 'button';
+  nextBtn.className = 'tao-analytics-subnet-nav-btn';
+  nextBtn.dataset.action = 'next';
+  nextBtn.textContent = 'Next';
+
+  nav.append(prevBtn, input, nextBtn);
+  bindSubnetNavigator(nav);
+  return nav;
+}
+
+function ensureSubnetNavigator() {
+  if (!isSubnetPage()) {
+    return;
+  }
+
+  const mount = findSubnetNavMountPoint();
+  if (!mount) {
+    return;
+  }
+
+  let nav = document.querySelector('.tao-analytics-subnet-nav');
+  if (!nav) {
+    nav = createSubnetNavigator();
+    mount.parent.insertBefore(nav, mount.before);
+  } else if (nav.parentElement !== mount.parent) {
+    mount.parent.insertBefore(nav, mount.before);
+  }
+
+  updateSubnetNavigatorState(nav);
+}
+
+let subnetNavObserver = null;
+let subnetNavUrlWatch = null;
+
+function teardownSubnetNavigator() {
+  if (subnetNavObserver) {
+    subnetNavObserver.disconnect();
+    subnetNavObserver = null;
+  }
+  if (subnetNavUrlWatch) {
+    clearInterval(subnetNavUrlWatch);
+    subnetNavUrlWatch = null;
+  }
+}
+
+function initSubnetNavigator() {
+  if (!isSubnetPage()) {
+    return;
+  }
+
+  const tryMount = () => {
+    ensureSubnetNavigator();
+  };
+
+  tryMount();
+
+  subnetNavObserver = new MutationObserver(tryMount);
+  subnetNavObserver.observe(document.documentElement, { childList: true, subtree: true });
+
+  let lastHref = location.href;
+  subnetNavUrlWatch = setInterval(() => {
+    if (location.href !== lastHref) {
+      lastHref = location.href;
+      tryMount();
+    }
+  }, 400);
+
+  window.addEventListener('beforeunload', teardownSubnetNavigator, { once: true });
+}
+
 function insertAfter(referenceNode, newNode) {
   if (!referenceNode?.parentElement) {
     return false;
@@ -1246,9 +1762,84 @@ function insertAfter(referenceNode, newNode) {
 }
 
 function applyColumnWidth(el, px) {
+  if (el.tagName === 'COL') {
+    el.style.width = `${px}px`;
+    return;
+  }
+
   el.style.width = `${px}px`;
   el.style.minWidth = `${px}px`;
   el.style.maxWidth = `${px}px`;
+}
+
+function getAnalyticsColumnWidth(className) {
+  if (className === COLUMN.BURN) {
+    return COLUMN_WIDTH.burn;
+  }
+  if (className === COLUMN.FEE) {
+    return COLUMN_WIDTH.fee;
+  }
+  if (className === COLUMN.MINERS) {
+    return getMinersColumnWidth();
+  }
+  return null;
+}
+
+function wrapAnalyticsHeaderContent(th) {
+  if (!th || th.querySelector(':scope > .tao-analytics-header-inner')) {
+    return;
+  }
+
+  const inner = document.createElement('div');
+  inner.className = 'tao-analytics-header-inner';
+  while (th.firstChild) {
+    inner.appendChild(th.firstChild);
+  }
+  th.appendChild(inner);
+}
+
+function syncAnalyticsColumnWidths(tableInfo) {
+  const table = tableInfo.table;
+  const headerRow = table.querySelector('thead tr');
+  const colgroup = table.querySelector('colgroup');
+  if (!headerRow) {
+    return;
+  }
+
+  const headers = [...headerRow.querySelectorAll('th')];
+  if (colgroup) {
+    syncAnalyticsColgroup(tableInfo, headers);
+  }
+
+  headers.forEach((th, idx) => {
+    const className = ANALYTICS_COLUMN_CLASSES.find((cls) => th.classList.contains(cls));
+    if (!className) {
+      return;
+    }
+
+    const width = getAnalyticsColumnWidth(className);
+    if (width == null) {
+      return;
+    }
+
+    wrapAnalyticsHeaderContent(th);
+    applyColumnWidth(th, width);
+
+    if (colgroup) {
+      const cols = [...colgroup.children];
+      if (cols[idx]) {
+        applyColumnWidth(cols[idx], width);
+      }
+    }
+
+    table.querySelectorAll('tbody tr').forEach((row) => {
+      const tds = [...row.querySelectorAll('td')];
+      const td = tds[idx];
+      if (td?.classList.contains(className)) {
+        applyColumnWidth(td, width);
+      }
+    });
+  });
 }
 
 function getStyleReference(tableInfo) {
@@ -1309,7 +1900,8 @@ function ensureColgroup(tableInfo) {
 
   applyColumnWidth(burnCol, COLUMN_WIDTH.burn);
   applyColumnWidth(feeCol, COLUMN_WIDTH.fee);
-  applyColumnWidth(minersCol, COLUMN_WIDTH.miners);
+  applyColumnWidth(minersCol, getMinersColumnWidth());
+  syncAnalyticsColumnWidths(tableInfo);
 }
 
 function setSortableHeaderLabel(button, label) {
@@ -1345,33 +1937,120 @@ function setSortableHeaderLabel(button, label) {
   insertParent.insertBefore(document.createTextNode(label), svg);
 }
 
+function isColumnMoveHandle(element) {
+  const btn = element?.closest?.('button') ?? (element?.matches?.('button') ? element : null);
+  if (!btn) {
+    return false;
+  }
+
+  const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+  if (/move|reorder|drag|column position/.test(aria)) {
+    return true;
+  }
+
+  return Boolean(
+    btn.querySelector(
+      'svg.lucide-move, svg.lucide-grip-vertical, svg.lucide-grip-horizontal, svg.lucide-grip'
+    )
+  );
+}
+
+function getSortButtonFromHeader(th) {
+  if (!th) {
+    return null;
+  }
+
+  const buttons = [...th.querySelectorAll('button')];
+  if (buttons.length === 0) {
+    return null;
+  }
+
+  if (buttons.length === 1) {
+    return isColumnMoveHandle(buttons[0]) ? null : buttons[0];
+  }
+
+  return buttons.find((btn) => !isColumnMoveHandle(btn)) || buttons[0];
+}
+
+function getMoveButtonFromHeader(th) {
+  if (!th) {
+    return null;
+  }
+
+  return [...th.querySelectorAll('button')].find((btn) => isColumnMoveHandle(btn)) ?? null;
+}
+
+function findNativeMoveButtonReference(headerRow) {
+  if (!headerRow) {
+    return null;
+  }
+
+  for (const th of headerRow.querySelectorAll('th')) {
+    if (isAnalyticsSortHeader(th)) {
+      continue;
+    }
+
+    const moveBtn = getMoveButtonFromHeader(th);
+    if (moveBtn) {
+      return moveBtn;
+    }
+  }
+
+  return null;
+}
+
+function ensureMoveButtonOnHeader(th, referenceTh) {
+  if (getMoveButtonFromHeader(th)) {
+    return;
+  }
+
+  const refMove = getMoveButtonFromHeader(referenceTh);
+  const headerRow = th.closest('tr');
+  const nativeMove = refMove || findNativeMoveButtonReference(headerRow);
+  if (!nativeMove) {
+    return;
+  }
+
+  const clone = nativeMove.cloneNode(true);
+  clone.removeAttribute('id');
+  th.appendChild(clone);
+}
+
 function buildSortableHeaderContent(label, referenceTh) {
-  const refButton = referenceTh?.querySelector('button') ?? referenceTh?.firstElementChild;
-  if (!refButton) {
+  if (!referenceTh?.querySelector('button')) {
     const fallback = document.createElement('button');
     fallback.type = 'button';
     fallback.className = 'tao-analytics-sort-btn';
     fallback.textContent = label;
-    return fallback;
+    return [fallback];
   }
 
-  const button = refButton.cloneNode(true);
-  button.removeAttribute('id');
-  setSortableHeaderLabel(button, label);
-  return button;
+  const shell = referenceTh.cloneNode(true);
+  shell.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
+
+  const sortBtn = getSortButtonFromHeader(shell);
+  if (sortBtn) {
+    setSortableHeaderLabel(sortBtn, label);
+  }
+
+  return [...shell.childNodes];
 }
 
 function populateSortableHeader(th, label, referenceTh, sortKey) {
   const hasSortUi = th.dataset.taoAnalyticsSort === sortKey &&
-    Boolean(th.querySelector('svg, .tao-analytics-sort-btn'));
+    Boolean(th.querySelector('svg, .tao-analytics-sort-btn, button'));
 
   if (!hasSortUi) {
     th.dataset.taoAnalyticsSort = sortKey;
-    th.replaceChildren(buildSortableHeaderContent(label, referenceTh));
+    th.replaceChildren(...buildSortableHeaderContent(label, referenceTh));
+    ensureMoveButtonOnHeader(th, referenceTh);
   } else {
-    const button = th.querySelector('button') ?? th.firstElementChild ?? th;
+    const button = getSortButtonFromHeader(th) ?? th.querySelector('button') ?? th.firstElementChild ?? th;
     setSortableHeaderLabel(button, label);
+    ensureMoveButtonOnHeader(th, referenceTh);
   }
+
+  wrapAnalyticsHeaderContent(th);
 
   if (referenceTh?.style?.cursor) {
     th.style.cursor = referenceTh.style.cursor;
@@ -1381,13 +2060,248 @@ function populateSortableHeader(th, label, referenceTh, sortKey) {
 function createHeaderCell(label, className, title, referenceTh, widthPx, sortKey) {
   const th = document.createElement('th');
   th.className = `tao-analytics-header ${className}`;
-  if (referenceTh?.className) {
-    th.className = `${referenceTh.className} tao-analytics-header ${className}`;
-  }
   th.title = title;
   applyColumnWidth(th, widthPx);
   populateSortableHeader(th, label, referenceTh, sortKey);
   return th;
+}
+
+function getHeaderColumnIndex(headerRow, th) {
+  return [...headerRow.querySelectorAll('th')].indexOf(th);
+}
+
+function moveColumnInRow(row, fromIdx, toIdx) {
+  const tds = [...row.querySelectorAll('td')];
+  const td = tds[fromIdx];
+  if (!td) {
+    return;
+  }
+
+  const refreshed = [...row.querySelectorAll('td')];
+  const target = refreshed[toIdx];
+  row.insertBefore(td, fromIdx < toIdx ? target?.nextSibling ?? null : target);
+}
+
+function reorderTableColumn(table, fromIdx, toIdx) {
+  if (fromIdx === toIdx) {
+    return;
+  }
+
+  const headerRow = table.querySelector('thead tr');
+  if (!headerRow) {
+    return;
+  }
+
+  const ths = [...headerRow.querySelectorAll('th')];
+  const th = ths[fromIdx];
+  const targetTh = ths[toIdx];
+  if (!th || !targetTh) {
+    return;
+  }
+
+  headerRow.insertBefore(th, fromIdx < toIdx ? targetTh.nextSibling : targetTh);
+
+  const colgroup = table.querySelector('colgroup');
+  if (colgroup) {
+    const cols = [...colgroup.children];
+    const col = cols[fromIdx];
+    if (col) {
+      const refreshedCols = [...colgroup.children];
+      const targetCol = refreshedCols[toIdx];
+      colgroup.insertBefore(col, fromIdx < toIdx ? targetCol?.nextSibling ?? null : targetCol);
+    }
+  }
+
+  table.querySelectorAll('tbody tr').forEach((row) => {
+    moveColumnInRow(row, fromIdx, toIdx);
+  });
+}
+
+function syncAnalyticsColgroup(tableInfo, headers) {
+  const colgroup = tableInfo.table.querySelector('colgroup');
+  if (!colgroup) {
+    return;
+  }
+
+  const colByClass = {
+    [COLUMN.BURN]: colgroup.querySelector('.tao-analytics-col-burn'),
+    [COLUMN.FEE]: colgroup.querySelector('.tao-analytics-col-fee'),
+    [COLUMN.MINERS]: colgroup.querySelector('.tao-analytics-col-miners'),
+  };
+
+  headers.forEach((th, idx) => {
+    const className = ANALYTICS_COLUMN_CLASSES.find((cls) => th.classList.contains(cls));
+    const col = className ? colByClass[className] : null;
+    if (!col) {
+      return;
+    }
+
+    const cols = [...colgroup.children];
+    const currentIdx = cols.indexOf(col);
+    if (currentIdx === idx) {
+      return;
+    }
+
+    const before = cols[idx];
+    colgroup.insertBefore(col, currentIdx < idx ? before?.nextSibling ?? null : before);
+  });
+}
+
+function syncAnalyticsColumnCells(tableInfo) {
+  const headerRow = tableInfo.table.querySelector('thead tr');
+  if (!headerRow) {
+    return;
+  }
+
+  const headers = [...headerRow.querySelectorAll('th')];
+
+  tableInfo.table.querySelectorAll('tbody tr').forEach((row) => {
+    ANALYTICS_COLUMN_CLASSES.forEach((className) => {
+      const headerIdx = headers.findIndex((th) => th.classList.contains(className));
+      const cell = row.querySelector(`.${className}`);
+      if (headerIdx < 0 || !cell) {
+        return;
+      }
+
+      const tds = [...row.querySelectorAll('td')];
+      const currentIdx = tds.indexOf(cell);
+      if (currentIdx === headerIdx) {
+        return;
+      }
+
+      const before = tds[headerIdx];
+      row.insertBefore(cell, currentIdx < headerIdx ? before?.nextSibling ?? null : before);
+    });
+  });
+
+  syncAnalyticsColgroup(tableInfo, headers);
+}
+
+function bindAnalyticsMoveHandles(headerRow) {
+  ANALYTICS_COLUMN_CLASSES.forEach((className) => {
+    const th = headerRow.querySelector(`.${className}`);
+    const moveBtn = th ? getMoveButtonFromHeader(th) : null;
+    if (!moveBtn || moveBtn.dataset.taoAnalyticsMoveBound === '1') {
+      return;
+    }
+
+    moveBtn.dataset.taoAnalyticsMoveBound = '1';
+    moveBtn.draggable = true;
+    moveBtn.addEventListener('mousedown', (event) => {
+      event.stopPropagation();
+    });
+    moveBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+    });
+  });
+}
+
+function attachColumnOrderObserver(tableInfo) {
+  const headerRow = tableInfo.table.querySelector('thead tr');
+  if (!headerRow) {
+    return;
+  }
+
+  if (!columnOrderObserver) {
+    columnOrderObserver = new MutationObserver(() => {
+      if (isEnhancing || isSorting) {
+        return;
+      }
+
+      const currentTable = findSubnetTable();
+      if (!currentTable) {
+        return;
+      }
+
+      isEnhancing = true;
+      try {
+        syncAnalyticsColumnCells(currentTable);
+        syncAnalyticsColumnWidths(currentTable);
+        bindAnalyticsMoveHandles(currentTable.table.querySelector('thead tr'));
+      } finally {
+        isEnhancing = false;
+      }
+    });
+  }
+
+  if (headerRow === observedColumnOrderRow) {
+    return;
+  }
+
+  columnOrderObserver.disconnect();
+  columnOrderObserver.observe(headerRow, { childList: true });
+  observedColumnOrderRow = headerRow;
+}
+
+function ensureColumnReorder(tableInfo) {
+  const table = tableInfo.table;
+  const headerRow = table.querySelector('thead tr');
+  if (!headerRow) {
+    return;
+  }
+
+  bindAnalyticsMoveHandles(headerRow);
+  attachColumnOrderObserver(tableInfo);
+
+  if (table.dataset.taoAnalyticsReorderBound === '1') {
+    return;
+  }
+
+  table.dataset.taoAnalyticsReorderBound = '1';
+
+  headerRow.addEventListener('dragstart', (event) => {
+    const moveBtn = event.target.closest('button');
+    if (!moveBtn || !isColumnMoveHandle(moveBtn)) {
+      return;
+    }
+
+    const th = moveBtn.closest('th');
+    if (!th || !ANALYTICS_COLUMN_CLASSES.some((cls) => th.classList.contains(cls))) {
+      return;
+    }
+
+    const fromIdx = getHeaderColumnIndex(headerRow, th);
+    if (fromIdx < 0) {
+      return;
+    }
+
+    columnDragState = { table, fromIdx };
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', String(fromIdx));
+  }, true);
+
+  headerRow.addEventListener('dragover', (event) => {
+    if (!columnDragState || columnDragState.table !== table) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  });
+
+  headerRow.addEventListener('drop', (event) => {
+    if (!columnDragState || columnDragState.table !== table) {
+      return;
+    }
+
+    event.preventDefault();
+    const th = event.target.closest('th');
+    const toIdx = th ? getHeaderColumnIndex(headerRow, th) : -1;
+    const fromIdx = columnDragState.fromIdx;
+    columnDragState = null;
+
+    if (toIdx < 0 || fromIdx < 0 || fromIdx === toIdx) {
+      return;
+    }
+
+    isEnhancing = true;
+    try {
+      reorderTableColumn(table, fromIdx, toIdx);
+      syncAnalyticsColumnWidths(findSubnetTable() || tableInfo);
+    } finally {
+      isEnhancing = false;
+    }
+  });
 }
 
 function getFeeUsdFromData(data, taoUsdPrice) {
@@ -1415,33 +2329,68 @@ function parseBurnFromCell(burnCell) {
   return parseBurnRate(text);
 }
 
-function formatMinerCount(value) {
+function formatMinerCount(value, topEmissions) {
   if (!Number.isInteger(value) || value < 0) {
     return '—';
   }
 
+  let base;
   if (value > MINER_COUNT_DISPLAY_CAP) {
-    return `${MINER_COUNT_DISPLAY_CAP}+`;
+    base = `${MINER_COUNT_DISPLAY_CAP}+`;
+  } else {
+    base = String(value);
   }
 
-  return String(value);
+  const emissions = Array.isArray(topEmissions)
+    ? topEmissions.filter((entry) => Number.isFinite(Number(entry)))
+    : [];
+  if (!shouldShowMinerEmissions() || emissions.length === 0) {
+    return base;
+  }
+
+  const suffix = emissions.map((entry) => formatTopMinerEmission(Number(entry))).join('/');
+  return `${base} (${suffix})`;
 }
 
-function formatMinerCountTitle(value) {
+function formatMinerCountTitle(value, topEmissions) {
   if (!Number.isInteger(value) || value < 0) {
     return 'Loading miner count';
   }
 
+  let title;
   if (value > MINER_COUNT_DISPLAY_CAP) {
-    return `More than ${MINER_COUNT_DISPLAY_CAP} active miners with positive incentive (owner excluded)`;
+    title = `More than ${MINER_COUNT_DISPLAY_CAP} active miners with positive incentive (owner excluded)`;
+  } else {
+    title = `Active miners with positive incentive: ${value} (owner row excluded)`;
   }
 
-  return `Active miners with positive incentive: ${value} (owner row excluded)`;
+  const emissions = Array.isArray(topEmissions)
+    ? topEmissions.filter((entry) => Number.isFinite(Number(entry)))
+    : [];
+  if (shouldShowMinerEmissions() && emissions.length > 0) {
+    const formatted = emissions.map((entry) => formatTopMinerEmission(Number(entry))).join(', ');
+    title += `. Top ${emissions.length} miner emission: ${formatted}`;
+  }
+
+  return title;
 }
 
 function getIncentiveMinerCountFromData(data) {
   const count = Number(data?.incentiveMinerCount);
   return Number.isInteger(count) && count >= 0 ? count : null;
+}
+
+function getTopMinerEmissionsFromData(data) {
+  const emissions = data?.topMinerEmissions;
+  if (!Array.isArray(emissions)) {
+    return null;
+  }
+
+  const normalized = emissions
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+
+  return normalized.length > 0 ? normalized : null;
 }
 
 function parseMinerCountFromCell(minersCell) {
@@ -1450,12 +2399,13 @@ function parseMinerCountFromCell(minersCell) {
     return null;
   }
 
-  const capped = text.match(/^(\d+)\+$/);
+  const baseText = text.split('(')[0].trim();
+  const capped = baseText.match(/^(\d+)\+$/);
   if (capped) {
     return Number(capped[1]) + 1;
   }
 
-  const count = Number(text.replace(/,/g, ''));
+  const count = Number(baseText.replace(/,/g, ''));
   return Number.isInteger(count) && count >= 0 ? count : null;
 }
 
@@ -1587,6 +2537,10 @@ function ensureColumnSortDelegation(tableInfo) {
 
   table.dataset.taoAnalyticsColumnSortBound = '1';
   table.addEventListener('click', (event) => {
+    if (isColumnMoveHandle(event.target)) {
+      return;
+    }
+
     const th = event.target.closest('thead th');
     if (!th) {
       return;
@@ -1616,9 +2570,6 @@ function ensureColumnSortDelegation(tableInfo) {
 function createBodyCell(className, text, title, referenceTd, widthPx) {
   const td = document.createElement('td');
   td.className = `tao-analytics-cell ${className}`;
-  if (referenceTd?.className) {
-    td.className = `${referenceTd.className} tao-analytics-cell ${className}`;
-  }
   td.textContent = text;
   td.title = title;
   applyColumnWidth(td, widthPx);
@@ -1730,7 +2681,7 @@ function ensureHeader(tableInfo) {
       COLUMN.MINERS,
       'Miners with positive incentive in the metagraph table (excludes owner/burn row)',
       refTh,
-      COLUMN_WIDTH.miners,
+      getMinersColumnWidth(),
       'miners'
     );
     insertAfter(feeHeader, minersHeader);
@@ -1740,7 +2691,8 @@ function ensureHeader(tableInfo) {
 
   applyColumnWidth(burnHeader, COLUMN_WIDTH.burn);
   applyColumnWidth(feeHeader, COLUMN_WIDTH.fee);
-  applyColumnWidth(minersHeader, COLUMN_WIDTH.miners);
+  applyColumnWidth(minersHeader, getMinersColumnWidth());
+  syncAnalyticsColumnWidths(tableInfo);
 
   return { burnHeader, feeHeader, minersHeader, nameTh, refTh };
 }
@@ -1817,8 +2769,9 @@ function enhanceRow(row, tableInfo, styleRef, taoUsdPrice) {
     ? `Registration fee: ${feeUsd != null ? formatUsd(feeUsd) : '—'}`
     : 'Loading registration fee';
   const minerCount = getIncentiveMinerCountFromData(data);
-  const minersText = data ? formatMinerCount(minerCount) : '—';
-  const minersTitle = data ? formatMinerCountTitle(minerCount) : 'Loading miner count';
+  const topEmissions = getTopMinerEmissionsFromData(data);
+  const minersText = data ? formatMinerCount(minerCount, topEmissions) : '—';
+  const minersTitle = data ? formatMinerCountTitle(minerCount, topEmissions) : 'Loading miner count';
 
   let burnCell = row.querySelector(`.${COLUMN.BURN}`);
   let feeCell = row.querySelector(`.${COLUMN.FEE}`);
@@ -1879,7 +2832,7 @@ function enhanceRow(row, tableInfo, styleRef, taoUsdPrice) {
       minersText,
       minersTitle,
       styleRef.refTd,
-      COLUMN_WIDTH.miners
+      getMinersColumnWidth()
     );
     insertAfter(feeCell, minersCell);
   } else {
@@ -1889,7 +2842,7 @@ function enhanceRow(row, tableInfo, styleRef, taoUsdPrice) {
     if (minersCell.title !== minersTitle) {
       minersCell.title = minersTitle;
     }
-    applyColumnWidth(minersCell, COLUMN_WIDTH.miners);
+    applyColumnWidth(minersCell, getMinersColumnWidth());
   }
 }
 
@@ -1902,6 +2855,8 @@ function enhanceTable(tableInfo) {
   const taoUsdPrice = scrapeTaoUsdPrice();
   ensureRowSyncDelegation(tableInfo.table);
   ensureColumnSortDelegation(tableInfo);
+  ensureColumnReorder(tableInfo);
+  syncAnalyticsColumnCells(tableInfo);
   tableInfo.table.querySelectorAll('tbody tr').forEach((row) => {
     enhanceRow(row, tableInfo, header, taoUsdPrice);
   });
@@ -1910,6 +2865,7 @@ function enhanceTable(tableInfo) {
     applyColumnSort(tableInfo);
   }
 
+  syncAnalyticsColumnWidths(tableInfo);
   attachTableObserver(tableInfo);
   return true;
 }
@@ -2039,12 +2995,15 @@ async function init() {
 
   if (isSubnetPage()) {
     initSubnetPageScrape();
+    initSubnetNavigator();
     return;
   }
 
   // Stop automatic background scraping; sync runs only via toolbar or row buttons.
   sendRuntimeMessage({ type: MESSAGE.STOP_BACKGROUND_TRACKING });
 
+  await loadMinerEmissionsPreference();
+  ensureMinerEmissionsToggle();
   ensureSyncButton();
 
   sendRuntimeMessage({ type: MESSAGE.SHEETS_PULL_IF_ENABLED }).catch(() => {});
@@ -2074,6 +3033,7 @@ async function init() {
   let attempts = 0;
   const bootstrap = setInterval(async () => {
     attempts += 1;
+    ensureMinerEmissionsToggle();
     ensureSyncButton();
     await refreshMetricsAndEnhance(false);
 
@@ -2100,6 +3060,7 @@ function initSubnetPageScrape() {
 
   let lastOwnerIncentive = null;
   let lastIncentiveMinerCount = null;
+  let lastTopMinerEmissions = null;
   const lastRegSignatureRef = { value: null };
   let lastHref = location.href;
   let scrapeReadyTimer = null;
@@ -2175,18 +3136,24 @@ function initSubnetPageScrape() {
   };
 
   const scrapeIncentiveMinerCount = async () => {
-    const minerCount = await collectIncentiveMinerCountFromMetagraphTable();
-    if (minerCount == null) {
+    const minerMetrics = await collectIncentiveMinerCountFromMetagraphTable();
+    if (minerMetrics == null || minerMetrics.count == null) {
       return false;
     }
 
-    if (minerCount === lastIncentiveMinerCount) {
+    const { count: minerCount, topEmissions } = minerMetrics;
+    if (
+      minerCount === lastIncentiveMinerCount &&
+      topMinerEmissionsEqual(topEmissions, lastTopMinerEmissions)
+    ) {
       return true;
     }
 
     lastIncentiveMinerCount = minerCount;
+    lastTopMinerEmissions = topEmissions;
     await upsertMetricCache(netuid, {
       incentiveMinerCount: minerCount,
+      topMinerEmissions: topEmissions,
       incentiveMinerCountCapturedAt: Date.now(),
       source: 'dom',
     });
