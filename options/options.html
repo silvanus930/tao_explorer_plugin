@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TAO Subnet Analytics</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0a0f1a;
+        --surface: #111827;
+        --surface-raised: #1a2332;
+        --border: rgba(148, 163, 184, 0.14);
+        --border-strong: rgba(148, 163, 184, 0.24);
+        --text: #f1f5f9;
+        --muted: #94a3b8;
+        --accent: #f59e0b;
+        --accent-hover: #fbbf24;
+        --accent-text: #0f172a;
+        --success: #34d399;
+        --error: #f87171;
+        --warning-bg: rgba(245, 158, 11, 0.1);
+        --warning-border: rgba(245, 158, 11, 0.35);
+        --warning-text: #fde68a;
+        --radius: 12px;
+        --radius-sm: 8px;
+        font-family: 'Segoe UI', Inter, system-ui, -apple-system, sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        width: 400px;
+        max-height: 600px;
+        overflow-y: auto;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.45;
+      }
+
+      .app {
+        padding: 18px 18px 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        padding-bottom: 4px;
+      }
+
+      .header h1 {
+        margin: 0;
+        font-size: 1.05rem;
+        font-weight: 650;
+        letter-spacing: -0.02em;
+      }
+
+      .header p {
+        margin: 4px 0 0;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+
+      .badge {
+        flex-shrink: 0;
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 0.68rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        background: rgba(245, 158, 11, 0.15);
+        color: var(--accent);
+        border: 1px solid rgba(245, 158, 11, 0.25);
+      }
+
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 14px;
+      }
+
+      .card-title {
+        margin: 0 0 4px;
+        font-size: 0.88rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      .card-desc {
+        margin: 0 0 14px;
+        font-size: 0.76rem;
+        color: var(--muted);
+      }
+
+      .card-desc:last-child {
+        margin-bottom: 0;
+      }
+
+      .field {
+        display: block;
+        margin-bottom: 12px;
+      }
+
+      .field:last-child {
+        margin-bottom: 0;
+      }
+
+      .field-label {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 0.76rem;
+        font-weight: 500;
+        color: #cbd5e1;
+      }
+
+      .field-hint {
+        display: block;
+        margin-top: 6px;
+        font-size: 0.7rem;
+        color: #64748b;
+        line-height: 1.4;
+      }
+
+      input[type='text'],
+      input[type='number'] {
+        width: 100%;
+        padding: 9px 11px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border-strong);
+        background: var(--surface-raised);
+        color: var(--text);
+        font-size: 0.82rem;
+        transition: border-color 0.15s, box-shadow 0.15s;
+      }
+
+      input[type='text']:focus,
+      input[type='number']:focus {
+        outline: none;
+        border-color: rgba(245, 158, 11, 0.55);
+        box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.12);
+      }
+
+      input::placeholder {
+        color: #64748b;
+      }
+
+      .toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--border);
+        cursor: pointer;
+        font-size: 0.8rem;
+      }
+
+      .toggle-row:last-of-type {
+        border-bottom: 0;
+        padding-bottom: 0;
+      }
+
+      .toggle-row span {
+        color: #e2e8f0;
+      }
+
+      .toggle-row input {
+        width: 16px;
+        height: 16px;
+        margin: 0;
+        accent-color: var(--accent);
+        cursor: pointer;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        width: 100%;
+        margin-top: 10px;
+        padding: 10px 14px;
+        border: 0;
+        border-radius: var(--radius-sm);
+        font-size: 0.82rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.15s, transform 0.1s;
+      }
+
+      .btn:active {
+        transform: scale(0.99);
+      }
+
+      .btn-primary {
+        background: linear-gradient(180deg, #fbbf24 0%, #f59e0b 100%);
+        color: var(--accent-text);
+      }
+
+      .btn-primary:hover {
+        background: linear-gradient(180deg, #fcd34d 0%, #fbbf24 100%);
+      }
+
+      .btn-secondary {
+        background: var(--surface-raised);
+        color: var(--text);
+        border: 1px solid var(--border-strong);
+      }
+
+      .btn-secondary:hover {
+        background: #243044;
+      }
+
+      .btn-ghost {
+        background: transparent;
+        color: var(--muted);
+        border: 1px dashed var(--border-strong);
+      }
+
+      .btn-ghost:hover {
+        color: var(--text);
+        border-color: var(--border-strong);
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .btn-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .btn-row .btn {
+        margin-top: 0;
+      }
+
+      .btn-group {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .id-block {
+        margin-bottom: 10px;
+        padding: 10px 11px;
+        border-radius: var(--radius-sm);
+        background: var(--surface-raised);
+        border: 1px solid var(--border);
+      }
+
+      .id-block:last-child {
+        margin-bottom: 0;
+      }
+
+      .id-label {
+        margin: 0 0 4px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+      }
+
+      .id-hint {
+        margin: 0 0 8px;
+        font-size: 0.72rem;
+        color: #64748b;
+        line-height: 1.4;
+      }
+
+      .id-value-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+      }
+
+      .id-value {
+        flex: 1;
+        margin: 0;
+        font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+        font-size: 0.7rem;
+        line-height: 1.45;
+        word-break: break-all;
+        color: var(--accent);
+      }
+
+      .copy-btn {
+        flex-shrink: 0;
+        padding: 5px 8px;
+        border: 1px solid var(--border-strong);
+        border-radius: 6px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 0.68rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .copy-btn:hover {
+        color: var(--text);
+        border-color: var(--accent);
+      }
+
+      details.oauth-details {
+        margin-bottom: 12px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        background: var(--surface-raised);
+        overflow: hidden;
+      }
+
+      details.oauth-details summary {
+        padding: 10px 12px;
+        font-size: 0.78rem;
+        font-weight: 500;
+        color: #cbd5e1;
+        cursor: pointer;
+        list-style: none;
+        user-select: none;
+      }
+
+      details.oauth-details summary::-webkit-details-marker {
+        display: none;
+      }
+
+      details.oauth-details summary::after {
+        content: '▾';
+        float: right;
+        color: var(--muted);
+        transition: transform 0.15s;
+      }
+
+      details.oauth-details[open] summary::after {
+        transform: rotate(180deg);
+      }
+
+      details.oauth-details .oauth-body {
+        padding: 0 12px 12px;
+        border-top: 1px solid var(--border);
+      }
+
+      .oauth-warning {
+        margin: 0 0 12px;
+        padding: 10px 11px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--warning-border);
+        background: var(--warning-bg);
+        color: var(--warning-text);
+        font-size: 0.74rem;
+        line-height: 1.45;
+      }
+
+      .oauth-warning.hidden {
+        display: none;
+      }
+
+      .status-bar {
+        min-height: 0;
+        padding: 0;
+        font-size: 0.76rem;
+        line-height: 1.4;
+        word-break: break-word;
+        border-radius: var(--radius-sm);
+        transition: padding 0.15s;
+      }
+
+      .status-bar:not(:empty) {
+        padding: 9px 11px;
+        background: rgba(52, 211, 153, 0.1);
+        border: 1px solid rgba(52, 211, 153, 0.25);
+        color: var(--success);
+      }
+
+      .status-bar.error:not(:empty) {
+        background: rgba(248, 113, 113, 0.1);
+        border-color: rgba(248, 113, 113, 0.25);
+        color: var(--error);
+      }
+
+      code {
+        font-family: ui-monospace, Consolas, monospace;
+        font-size: 0.9em;
+        color: #fcd34d;
+      }
+
+      .divider {
+        height: 1px;
+        background: var(--border);
+        margin: 4px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div>
+          <h1>TAO Subnet Analytics</h1>
+          <p>Burn rate &amp; registration fees for tao.app</p>
+        </div>
+        <span class="badge" id="version-badge">v1.5</span>
+      </header>
+
+      <section class="card">
+        <h2 class="card-title">General</h2>
+        <p class="card-desc">
+          Reg fees from Finney RPC. Burn rate from metagraph scrape. Optional USD via
+          <code>.env</code> + <code>sync-env.js</code>.
+        </p>
+
+        <form id="settings-form">
+          <label class="field">
+            <span class="field-label">Cache refresh (minutes)</span>
+            <input id="refreshMinutes" type="number" min="1" max="120" value="10" />
+          </label>
+
+          <label class="toggle-row">
+            <span>Enrich with TAO.app API</span>
+            <input id="useTaoApi" type="checkbox" />
+          </label>
+
+          <label class="field">
+            <span class="field-label">TAO.app API key (optional)</span>
+            <input
+              id="taoApiKey"
+              type="text"
+              autocomplete="off"
+              placeholder="Paste key or use scripts/sync-env.js"
+            />
+          </label>
+
+          <button type="submit" class="btn btn-primary">Save settings</button>
+        </form>
+
+        <div id="status" class="status-bar" role="status"></div>
+      </section>
+
+      <section class="card">
+        <h2 class="card-title">Google Sheets sync</h2>
+        <p class="card-desc">
+          Community sheet is pre-filled for new users — pull burn/reg fee cache without setup.
+          Maintainer pushes updates; others pull on first open (public link, no sign-in).
+        </p>
+
+        <p id="oauth-setup-warning" class="oauth-warning hidden"></p>
+
+        <details class="oauth-details">
+          <summary>OAuth setup IDs</summary>
+          <div class="oauth-body">
+            <div class="id-block">
+              <p class="id-label">Extension ID</p>
+              <p class="id-hint">Google Cloud → Clients → Chrome extension → Application ID</p>
+              <div class="id-value-row">
+                <code class="id-value" id="extension-id"></code>
+                <button type="button" class="copy-btn" data-copy-target="extension-id">Copy</button>
+              </div>
+            </div>
+            <div class="id-block">
+              <p class="id-label">OAuth Client ID</p>
+              <p class="id-hint">
+                Put in <code>.env</code> as <code>GOOGLE_OAUTH_CLIENT_ID</code> — not the Extension ID
+              </p>
+              <div class="id-value-row">
+                <code class="id-value" id="oauth-client-id"></code>
+                <button type="button" class="copy-btn" data-copy-target="oauth-client-id">Copy</button>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <form id="sheets-form">
+          <label class="toggle-row">
+            <span>Enable Google Sheets sync</span>
+            <input id="sheetsEnabled" type="checkbox" />
+          </label>
+
+          <label class="field">
+            <span class="field-label">Spreadsheet URL or ID</span>
+            <input
+              id="sheetsSpreadsheetId"
+              type="text"
+              autocomplete="off"
+              placeholder="Community sheet URL (pre-filled by default)"
+            />
+            <span class="field-hint" id="sheet-default-hint"></span>
+          </label>
+
+          <label class="toggle-row">
+            <span>Pull without sign-in (public view link)</span>
+            <input id="sheetsPublicPull" type="checkbox" checked />
+          </label>
+
+          <label class="toggle-row">
+            <span>Auto-upload after cache changes</span>
+            <input id="sheetsAutoSync" type="checkbox" checked />
+          </label>
+
+          <label class="toggle-row">
+            <span>Download when explorer opens</span>
+            <input id="sheetsPullOnLoad" type="checkbox" checked />
+          </label>
+
+          <div class="btn-group">
+            <button type="button" id="create-sheet-btn" class="btn btn-ghost">Create new spreadsheet</button>
+
+            <div class="btn-row">
+              <button type="button" id="pull-sheet-btn" class="btn btn-secondary">Pull</button>
+              <button type="button" id="push-sheet-btn" class="btn btn-secondary" title="Requires Google sign-in (maintainer only)">Push</button>
+            </div>
+
+            <button type="button" id="sync-sheet-btn" class="btn btn-primary" title="Requires Google sign-in (maintainer only)">Sync both ways</button>
+            <button type="submit" class="btn btn-secondary">Save Sheets settings</button>
+          </div>
+        </form>
+
+        <div id="sheets-status" class="status-bar" role="status"></div>
+      </section>
+    </div>
+
+    <script src="../config/defaults.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>

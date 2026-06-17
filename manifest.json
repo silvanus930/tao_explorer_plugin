@@ -1,0 +1,72 @@
+{
+  "manifest_version": 3,
+  "name": "TAO Subnet Analytics",
+  "version": "1.5.6",
+  "description": "Adds subnet burn rate and registration fee to tao.app explorer",
+  "permissions": [
+    "storage",
+    "alarms",
+    "tabs",
+    "windows",
+    "identity"
+  ],
+  "oauth2": {
+    "client_id": "563628786439-omv694h4g1fk398i5t8dsclnr0j7c6gn.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/spreadsheets"
+    ]
+  },
+  "host_permissions": [
+    "https://www.tao.app/*",
+    "https://tao.app/*",
+    "https://api.tao.app/*",
+    "https://entrypoint-finney.opentensor.ai/*",
+    "https://www.googleapis.com/*",
+    "https://sheets.googleapis.com/*",
+    "https://docs.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "action": {
+    "default_title": "TAO Subnet Analytics",
+    "default_popup": "options/options.html"
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": false
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.tao.app/explorer*",
+        "https://tao.app/explorer*",
+        "https://www.tao.app/subnets/*",
+        "https://tao.app/subnets/*"
+      ],
+      "js": [
+        "content/main.js"
+      ],
+      "css": [
+        "styles/style.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "content/pageHook.js"
+      ],
+      "matches": [
+        "https://www.tao.app/*",
+        "https://tao.app/*"
+      ]
+    }
+  ]
+}
