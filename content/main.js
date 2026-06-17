@@ -36,13 +36,104 @@ let metrics = new Map();
 let tableObserver = null;
 let observedTbody = null;
 let isEnhancing = false;
+let isSorting = false;
 let enhanceDebounceTimer = null;
 let pendingCacheReload = false;
 const ENHANCE_DEBOUNCE_MS = 200;
 const rowSyncing = new Set();
 let globalSyncRunning = false;
 let globalSyncNetuid = null;
+let headerSortObserver = null;
+let observedSortThead = null;
 let columnSortState = { key: null, direction: null };
+
+function isAnalyticsSortHeader(th) {
+  return Boolean(
+    th &&
+    (th.classList.contains(COLUMN.BURN) || th.classList.contains(COLUMN.FEE)) &&
+    th.dataset.taoAnalyticsSort
+  );
+}
+
+function resetAnalyticsSortHeaderUi(tableInfo) {
+  const headerRow = tableInfo?.table?.querySelector('thead tr');
+  if (!headerRow) {
+    return;
+  }
+
+  const { refTh } = getStyleReference(tableInfo);
+  if (!refTh) {
+    return;
+  }
+
+  const burnHeader = headerRow.querySelector(`.${COLUMN.BURN}`);
+  const feeHeader = headerRow.querySelector(`.${COLUMN.FEE}`);
+
+  if (burnHeader) {
+    burnHeader.dataset.taoAnalyticsSort = 'burn';
+    burnHeader.replaceChildren(buildSortableHeaderContent('Burn Rate', refTh));
+    burnHeader.removeAttribute('aria-sort');
+  }
+
+  if (feeHeader) {
+    feeHeader.dataset.taoAnalyticsSort = 'fee';
+    feeHeader.replaceChildren(buildSortableHeaderContent('Reg. Fee', refTh));
+    feeHeader.removeAttribute('aria-sort');
+  }
+}
+
+function clearAnalyticsColumnSort(tableInfo) {
+  columnSortState = { key: null, direction: null };
+  if (tableInfo) {
+    resetAnalyticsSortHeaderUi(tableInfo);
+  }
+}
+
+function attachNativeSortObserver(tableInfo) {
+  const thead = tableInfo?.table?.querySelector('thead');
+  if (!thead) {
+    return;
+  }
+
+  if (!headerSortObserver) {
+    headerSortObserver = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type !== 'attributes' || mutation.attributeName !== 'aria-sort') {
+          continue;
+        }
+
+        const th = mutation.target;
+        if (!(th instanceof Element) || th.tagName !== 'TH') {
+          continue;
+        }
+
+        if (isAnalyticsSortHeader(th)) {
+          continue;
+        }
+
+        const sortValue = th.getAttribute('aria-sort');
+        if (!sortValue || sortValue === 'none') {
+          continue;
+        }
+
+        clearAnalyticsColumnSort(findSubnetTable());
+        return;
+      }
+    });
+  }
+
+  if (thead === observedSortThead) {
+    return;
+  }
+
+  headerSortObserver.disconnect();
+  headerSortObserver.observe(thead, {
+    attributes: true,
+    subtree: true,
+    attributeFilter: ['aria-sort'],
+  });
+  observedSortThead = thead;
+}
 
 function isExtensionContextValid() {
   try {
@@ -1021,34 +1112,55 @@ function applyColumnSort(tableInfo) {
     return direction === 'asc' ? cmp : -cmp;
   });
 
-  indexed.forEach(({ row }) => tbody.appendChild(row));
+  const alreadySorted = indexed.every(({ row }, index) => row === rows[index]);
   updateAnalyticsSortIndicators(tableInfo);
+  if (alreadySorted) {
+    return;
+  }
+
+  isSorting = true;
+  try {
+    const fragment = document.createDocumentFragment();
+    indexed.forEach(({ row }) => fragment.appendChild(row));
+    tbody.appendChild(fragment);
+  } finally {
+    isSorting = false;
+  }
 }
 
 function ensureColumnSortDelegation(tableInfo) {
   const table = tableInfo.table;
+  attachNativeSortObserver(tableInfo);
+
   if (table.dataset.taoAnalyticsColumnSortBound === '1') {
     return;
   }
 
   table.dataset.taoAnalyticsColumnSortBound = '1';
   table.addEventListener('click', (event) => {
-    const th = event.target.closest(`th.${COLUMN.BURN}, th.${COLUMN.FEE}`);
-    if (!th?.dataset.taoAnalyticsSort) {
+    const th = event.target.closest('thead th');
+    if (!th) {
       return;
     }
 
-    event.preventDefault();
-    event.stopPropagation();
+    if (isAnalyticsSortHeader(th)) {
+      event.preventDefault();
+      event.stopPropagation();
 
-    const sortKey = th.dataset.taoAnalyticsSort;
-    const nextDirection =
-      columnSortState.key === sortKey && columnSortState.direction === 'desc'
-        ? 'asc'
-        : 'desc';
+      const sortKey = th.dataset.taoAnalyticsSort;
+      const nextDirection =
+        columnSortState.key === sortKey && columnSortState.direction === 'desc'
+          ? 'asc'
+          : 'desc';
 
-    columnSortState = { key: sortKey, direction: nextDirection };
-    applyColumnSort(tableInfo);
+      columnSortState = { key: sortKey, direction: nextDirection };
+      applyColumnSort(tableInfo);
+      return;
+    }
+
+    if (event.target.closest('thead th button')) {
+      clearAnalyticsColumnSort(tableInfo);
+    }
   }, true);
 }
 
@@ -1322,7 +1434,7 @@ function attachTableObserver(tableInfo) {
 
   if (!tableObserver) {
     tableObserver = new MutationObserver(() => {
-      if (isEnhancing) {
+      if (isEnhancing || isSorting) {
         return;
       }
       scheduleEnhance();
