@@ -11,6 +11,7 @@ const MESSAGE = {
   GET_SYNC_STATUS: 'GET_SYNC_STATUS',
   SCRAPE_PAGE_READY: 'SCRAPE_PAGE_READY',
   METRICS_REFRESH: 'METRICS_REFRESH',
+  REQUEST_EXPLORER_REFRESH: 'REQUEST_EXPLORER_REFRESH',
   SHEETS_PUSH: 'SHEETS_PUSH',
   SHEETS_PULL: 'SHEETS_PULL',
   SHEETS_SYNC: 'SHEETS_SYNC',
@@ -32,6 +33,7 @@ const COLUMN_WIDTH = {
 const COLUMN_WIDTH_MINERS_EXPANDED = 200;
 const MINERS_EMISSIONS_PREF_KEY = 'showMinerEmissions';
 const HIDE_SUBNET_TRADING_VIEW_KEY = 'hideSubnetTradingView';
+const METagraph_SCRAPE_DEBUG_KEY = 'metagraphScrapeDebug';
 
 const MINER_COUNT_DISPLAY_CAP = 40;
 const SUBNET_NETUID_MAX = 128;
@@ -47,7 +49,8 @@ let isEnhancing = false;
 let isSorting = false;
 let enhanceDebounceTimer = null;
 let pendingCacheReload = false;
-const ENHANCE_DEBOUNCE_MS = 200;
+const ENHANCE_DEBOUNCE_MS = 120;
+const ENHANCE_IMMEDIATE_MS = 0;
 const rowSyncing = new Set();
 let globalSyncRunning = false;
 let globalSyncNetuid = null;
@@ -59,6 +62,10 @@ let columnOrderObserver = null;
 let observedColumnOrderRow = null;
 let showMinerEmissions = false;
 let hideSubnetTradingView = false;
+let metagraphScrapeDebug = false;
+let metagraphDebugModalHost = null;
+let lastMetagraphDebugSignature = null;
+let lastAboutDebugSignature = null;
 let tradingViewHideObserver = null;
 let tradingViewHideUrlWatch = null;
 let tradingViewHideTimer = null;
@@ -313,6 +320,17 @@ function parseNetuid(text) {
   return netuid >= 0 && netuid <= SUBNET_NETUID_MAX ? netuid : null;
 }
 
+function parseMinerUid(text) {
+  const normalized = normalizeText(text);
+  const match = normalized.match(/^(\d+)$/);
+  if (!match) {
+    return null;
+  }
+
+  const uid = Number(match[1]);
+  return Number.isInteger(uid) && uid >= 0 && uid <= 65535 ? uid : null;
+}
+
 function formatTaoDisplay(value) {
   if (value == null || !Number.isFinite(value)) {
     return '—';
@@ -390,7 +408,47 @@ function isBurnRateKnown(data) {
 }
 
 function isRegFeeKnown(data) {
-  return Boolean(data && data.burnTao != null);
+  return Boolean(
+    data &&
+      (data.burnTao != null ||
+        (data.burnUsd != null && Number.isFinite(Number(data.burnUsd))))
+  );
+}
+
+function formatRegFeeDisplay(data, taoUsd) {
+  if (!data) {
+    return { text: '—', title: 'Loading registration fee' };
+  }
+
+  if (data.burnUsd != null && Number.isFinite(Number(data.burnUsd))) {
+    const usd = Number(data.burnUsd);
+    return {
+      text: formatUsd(usd),
+      title: `Registration fee: ${formatUsd(usd)}`,
+    };
+  }
+
+  const price = taoUsd ?? data.taoUsd ?? null;
+  if (data.burnTao != null && price) {
+    const usd = Number(data.burnTao) * price;
+    return {
+      text: formatUsd(usd),
+      title: `Registration fee: ${formatUsd(usd)}`,
+    };
+  }
+
+  if (data.burnTao != null && Number.isFinite(Number(data.burnTao))) {
+    const text = `${formatTaoDisplay(Number(data.burnTao))} τ`;
+    return {
+      text,
+      title: `Registration fee: ${text}`,
+    };
+  }
+
+  return {
+    text: '—',
+    title: 'Registration fee unknown — click sync to load',
+  };
 }
 
 function isMinersCountKnown(data) {
@@ -749,7 +807,7 @@ function ensureSyncButton() {
           total: status[SYNC_STATUS_KEY].total ?? 0,
         });
         rowSyncing.clear();
-        scheduleCacheEnhance();
+        scheduleCacheEnhance({ immediate: true });
         return;
       }
 
@@ -811,7 +869,7 @@ async function syncSingleSubnet(netuid) {
   } finally {
     rowSyncing.delete(netuid);
     updateRowSyncIndicator(netuid, false);
-    scheduleCacheEnhance();
+    scheduleCacheEnhance({ immediate: true });
   }
 }
 
@@ -854,47 +912,140 @@ async function requestMetrics(tableInfo, force = false) {
     throw new Error(response.error);
   }
 
-  metrics = new Map(
-    Object.entries(response || {}).map(([netuid, value]) => [Number(netuid), value])
+  if (!response || typeof response !== 'object') {
+    return;
+  }
+
+  Object.entries(response).forEach(([netuid, value]) => {
+    if (value && typeof value === 'object') {
+      const id = Number(netuid);
+      const existing = metrics.get(id);
+      metrics.set(
+        id,
+        existing && typeof existing === 'object' ? mergeCacheEntry(existing, value) : value
+      );
+    }
+  });
+}
+
+function applyLiveMetricsUpdate(netuid, entry) {
+  if (netuid == null || !entry || typeof entry !== 'object') {
+    return;
+  }
+
+  const id = Number(netuid);
+  const existing = metrics.get(id);
+  metrics.set(
+    id,
+    existing && typeof existing === 'object' ? mergeCacheEntry(existing, entry) : { ...entry, netuid: id }
   );
+}
+
+function handleMetricsRefreshMessage(message) {
+  if (message?.netuid != null && message?.entry && typeof message.entry === 'object') {
+    applyLiveMetricsUpdate(Number(message.netuid), message.entry);
+    scheduleTableEnhance({ reloadCache: false, delayMs: 0 });
+    return;
+  }
+
+  scheduleCacheEnhance({ immediate: true });
+}
+
+function requestExplorerRefresh() {
+  sendRuntimeMessage({ type: MESSAGE.REQUEST_EXPLORER_REFRESH }).catch(() => {});
 }
 
 async function upsertMetricCache(netuid, patch) {
   if (!isExtensionContextValid()) {
-    return;
+    return { ok: false, reason: 'invalid_context' };
   }
+
+  const normalizedNetuid = Number(netuid);
+  const normalizedPatch = {
+    ...patch,
+    netuid: normalizedNetuid,
+    updatedAt: Date.now(),
+  };
 
   const response = await sendRuntimeMessage({
     type: MESSAGE.UPSERT_METRIC,
-    netuid: Number(netuid),
-    patch,
+    netuid: normalizedNetuid,
+    patch: normalizedPatch,
   });
 
   if (response?.ok) {
-    return;
+    const entry =
+      response.entry && typeof response.entry === 'object'
+        ? { ...response.entry, netuid: normalizedNetuid }
+        : mergeCacheEntry(metrics.get(normalizedNetuid), normalizedPatch);
+    metrics.set(normalizedNetuid, entry);
+    if (isExplorerPage()) {
+      scheduleTableEnhance({ reloadCache: false, delayMs: 0 });
+    } else {
+      requestExplorerRefresh();
+    }
+    return { ok: true, entry };
   }
 
-  const stored = await getLocalStorage(STORAGE_CACHE_KEY);
-  const entry = stored?.[STORAGE_CACHE_KEY] ?? null;
-  const value =
-    entry?.value && typeof entry.value === 'object' ? { ...entry.value } : {};
-  const key = String(netuid);
-  const current =
-    value[key] && typeof value[key] === 'object' ? value[key] : { netuid };
+  try {
+    const stored = await getLocalStorage(STORAGE_CACHE_KEY);
+    const entry = stored?.[STORAGE_CACHE_KEY] ?? null;
+    const value =
+      entry?.value && typeof entry.value === 'object' ? { ...entry.value } : {};
+    const key = String(normalizedNetuid);
+    const current =
+      value[key] && typeof value[key] === 'object'
+        ? value[key]
+        : { netuid: normalizedNetuid };
 
-  value[key] = {
-    ...current,
+    const mergedEntry = mergeCacheEntry(current, normalizedPatch);
+
+    value[key] = mergedEntry;
+
+    await setLocalStorage({
+      [STORAGE_CACHE_KEY]: {
+        timestamp: Date.now(),
+        ttl: entry?.ttl ?? DEFAULT_CACHE_TTL_MS,
+        value,
+      },
+    });
+
+    metrics.set(normalizedNetuid, mergedEntry);
+    requestExplorerRefresh();
+    return { ok: true, entry: mergedEntry, source: 'local' };
+  } catch {
+    return { ok: false, reason: 'storage_error' };
+  }
+}
+
+function mergeCacheEntry(existing, incoming) {
+  const base =
+    existing && typeof existing === 'object'
+      ? existing
+      : { netuid: Number(incoming?.netuid ?? 0) };
+  const patch = incoming && typeof incoming === 'object' ? incoming : {};
+  const netuid = Number(patch.netuid ?? base.netuid ?? 0);
+  const stamps = [
+    base.updatedAt,
+    patch.updatedAt,
+    base.domCapturedAt,
+    patch.domCapturedAt,
+    base.rpcCapturedAt,
+    patch.rpcCapturedAt,
+    base.ownerIncentiveCapturedAt,
+    patch.ownerIncentiveCapturedAt,
+    base.incentiveMinerCountCapturedAt,
+    patch.incentiveMinerCountCapturedAt,
+  ]
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  return {
+    ...base,
     ...patch,
-    source: patch.source ?? current.source ?? 'dom',
+    netuid,
+    updatedAt: stamps.length > 0 ? Math.max(...stamps) : Date.now(),
   };
-
-  await setLocalStorage({
-    [STORAGE_CACHE_KEY]: {
-      timestamp: Date.now(),
-      ttl: entry?.ttl ?? DEFAULT_CACHE_TTL_MS,
-      value,
-    },
-  });
 }
 
 async function loadMetricsFromLocalCache(tableInfo) {
@@ -907,11 +1058,20 @@ async function loadMetricsFromLocalCache(tableInfo) {
   const entry = stored?.[STORAGE_CACHE_KEY] ?? null;
   const value = entry?.value && typeof entry.value === 'object' ? entry.value : {};
 
-  // Merge visible rows from cache into the in-memory map.
   netuids.forEach((netuid) => {
-    const cached = value[String(netuid)];
-    if (cached) {
-      metrics.set(Number(netuid), cached);
+    const cached =
+      value[String(netuid)] ??
+      value[netuid] ??
+      null;
+    if (cached && typeof cached === 'object') {
+      const id = Number(netuid);
+      const existing = metrics.get(id);
+      metrics.set(
+        id,
+        existing && typeof existing === 'object'
+          ? mergeCacheEntry(existing, { ...cached, netuid: id })
+          : { ...cached, netuid: id }
+      );
     }
   });
 }
@@ -943,8 +1103,7 @@ function delay(ms) {
 }
 
 function isMetagraphScrapePageReady() {
-  const activeTab = getActiveSubnetTab();
-  if (activeTab !== 'metagraph') {
+  if (!isMetagraphTabActive()) {
     return false;
   }
 
@@ -956,17 +1115,35 @@ function isMetagraphScrapePageReady() {
   return Boolean(document.querySelector('[aria-label="Owner incentive"]'));
 }
 
+function isAboutScrapePageReady() {
+  if (!isAboutSubnetTab()) {
+    return false;
+  }
+
+  const rows = document.querySelectorAll('div.flex.items-center.justify-between');
+  for (const row of rows) {
+    const labelText = normalizeText(row.children[0]?.textContent ?? '');
+    if (matchesRegCostLabel(labelText)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function isMetagraphBurnPageReady() {
   return isMetagraphScrapePageReady();
 }
 
 function findMetagraphTable() {
-  const activeTab = getActiveSubnetTab();
-  if (activeTab !== 'metagraph') {
+  if (!isMetagraphTabActive()) {
     return null;
   }
 
-  for (const table of document.querySelectorAll('table')) {
+  const panel = findMetagraphTabPanel();
+  const scope = panel instanceof HTMLElement ? panel : document;
+
+  for (const table of scope.querySelectorAll('table')) {
     const headerCells = [...table.querySelectorAll('thead th')];
     if (headerCells.length < 4) {
       continue;
@@ -983,6 +1160,429 @@ function findMetagraphTable() {
   }
 
   return null;
+}
+
+function collectMetagraphTableSampleRows(limit = 8) {
+  const tableInfo = findMetagraphTable();
+  if (!tableInfo) {
+    return [];
+  }
+
+  const rows = [];
+  for (const row of tableInfo.table.querySelectorAll('tbody tr')) {
+    if (rows.length >= limit) {
+      break;
+    }
+
+    const cells = [...row.querySelectorAll('td')];
+    const incentiveCell = cells[tableInfo.incentiveIdx];
+    const emissionCell = tableInfo.emissionIdx >= 0 ? cells[tableInfo.emissionIdx] : null;
+    const uidCell = tableInfo.uidIdx >= 0 ? cells[tableInfo.uidIdx] : null;
+
+    rows.push({
+      uid: normalizeText(uidCell?.textContent ?? ''),
+      incentive: parseIncentiveCellValue(incentiveCell?.textContent ?? ''),
+      incentiveText: normalizeText(incentiveCell?.textContent ?? ''),
+      emission: normalizeText(emissionCell?.textContent ?? ''),
+      isOwner: isMetagraphOwnerMinerRow(row, tableInfo),
+      hasFlame: Boolean(
+        incentiveCell?.querySelector('svg.lucide-flame, [class*="flame"]') ||
+          isOrangeBurnElement(incentiveCell)
+      ),
+    });
+  }
+
+  return rows;
+}
+
+async function resolveCacheEntryForNetuid(netuid) {
+  const id = Number(netuid);
+  const cached = metrics.get(id);
+  if (cached && typeof cached === 'object') {
+    return { ...cached, netuid: id };
+  }
+
+  try {
+    const stored = await getLocalStorage(STORAGE_CACHE_KEY);
+    const root = stored?.[STORAGE_CACHE_KEY]?.value;
+    if (root && typeof root === 'object') {
+      const entry = root[String(id)] ?? root[id];
+      if (entry && typeof entry === 'object') {
+        const normalized = { ...entry, netuid: id };
+        metrics.set(id, normalized);
+        return normalized;
+      }
+    }
+  } catch {
+    // Ignore cache read errors in debug path.
+  }
+
+  return null;
+}
+
+function formatCacheStatus(status) {
+  switch (status) {
+    case 'updated':
+      return 'Updated';
+    case 'unchanged':
+      return 'Skipped (unchanged)';
+    case 'failed':
+      return 'Failed';
+    case 'missing':
+      return 'Not scraped';
+    default:
+      return status || '—';
+  }
+}
+
+function deriveOverallCacheStatus(scrapeDetails = {}) {
+  const statuses = [scrapeDetails.ownerCacheStatus, scrapeDetails.minersCacheStatus].filter(Boolean);
+  if (statuses.length === 0) {
+    return scrapeDetails.cacheEntry ? 'unchanged' : 'missing';
+  }
+  if (statuses.some((status) => status === 'updated')) {
+    return 'updated';
+  }
+  if (statuses.some((status) => status === 'failed')) {
+    return 'failed';
+  }
+  if (statuses.every((status) => status === 'unchanged')) {
+    return 'unchanged';
+  }
+  return 'unknown';
+}
+
+function buildMetagraphScrapeDebugSnapshot(netuid, scrapeDetails = {}) {
+  const tableInfo = findMetagraphTable();
+  const cacheEntry = scrapeDetails.cacheEntry ?? metrics.get(Number(netuid)) ?? null;
+  const overallCacheStatus =
+    scrapeDetails.overallCacheStatus ?? deriveOverallCacheStatus({ ...scrapeDetails, cacheEntry });
+
+  return {
+    netuid: Number(netuid),
+    href: location.href,
+    tab: getEffectiveActiveSubnetTab(),
+    scrapedAt: new Date().toISOString(),
+    pageReady: isMetagraphScrapePageReady(),
+    tableFound: Boolean(tableInfo),
+    incentiveSortedDesc: tableInfo ? isMetagraphIncentiveSortedDesc(tableInfo) : false,
+    ownerIncentive: scrapeDetails.ownerIncentive ?? collectOwnerIncentiveFromDom(),
+    ownerCacheStatus: scrapeDetails.ownerCacheStatus ?? 'unknown',
+    minerCount: scrapeDetails.minerCount ?? null,
+    topMinerEmissions: scrapeDetails.topEmissions ?? null,
+    minersCacheStatus: scrapeDetails.minersCacheStatus ?? 'unknown',
+    overallCacheStatus,
+    cacheUpdatedAt: cacheEntry?.updatedAt ?? null,
+    tableSample: collectMetagraphTableSampleRows(8),
+    cacheEntry,
+    diagnostics: scrapeDetails.diagnostics ?? {},
+  };
+}
+
+function formatDebugValue(value) {
+  if (value == null) {
+    return '—';
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : '—';
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value.join(', ') : '—';
+  }
+  if (typeof value === 'object') {
+    return JSON.stringify(value, null, 2);
+  }
+  return String(value);
+}
+
+function hideMetagraphScrapeDebugModal() {
+  metagraphDebugModalHost?.remove();
+  metagraphDebugModalHost = null;
+  document.documentElement.classList.remove('tao-analytics-debug-modal-open');
+}
+
+function showMetagraphScrapeDebugModal(snapshot) {
+  if (!metagraphScrapeDebug || document.visibilityState === 'hidden') {
+    return;
+  }
+
+  hideMetagraphScrapeDebugModal();
+
+  const host = document.createElement('div');
+  host.className = 'tao-analytics-debug-modal-host';
+  host.innerHTML = `
+    <div class="tao-analytics-debug-modal-backdrop" data-close="1"></div>
+    <div class="tao-analytics-debug-modal" role="dialog" aria-labelledby="tao-analytics-debug-title">
+      <div class="tao-analytics-debug-modal-header">
+        <div>
+          <p class="tao-analytics-debug-eyebrow">Metagraph scrape debug</p>
+          <h2 id="tao-analytics-debug-title">Subnet ${snapshot.netuid} scrape succeeded</h2>
+        </div>
+        <button type="button" class="tao-analytics-debug-close" aria-label="Close">×</button>
+      </div>
+      <div class="tao-analytics-debug-modal-body">
+        <div class="tao-analytics-debug-grid">
+          <div class="tao-analytics-debug-card">
+            <h3>Burn rate</h3>
+            <p class="tao-analytics-debug-value">${formatBurnRate(getBurnRateFromData({ ownerIncentive: snapshot.ownerIncentive }))}</p>
+            <p class="tao-analytics-debug-meta">ownerIncentive: ${formatDebugValue(snapshot.ownerIncentive)}</p>
+            <p class="tao-analytics-debug-meta">Cache: ${formatCacheStatus(snapshot.ownerCacheStatus)}</p>
+          </div>
+          <div class="tao-analytics-debug-card">
+            <h3>Miners</h3>
+            <p class="tao-analytics-debug-value">${formatDebugValue(snapshot.minerCount)}</p>
+            <p class="tao-analytics-debug-meta">Top emissions: ${formatDebugValue(snapshot.topMinerEmissions)}</p>
+            <p class="tao-analytics-debug-meta">Count excludes owner row</p>
+            <p class="tao-analytics-debug-meta">Cache: ${formatCacheStatus(snapshot.minersCacheStatus)}</p>
+          </div>
+          <div class="tao-analytics-debug-card">
+            <h3>Cache</h3>
+            <p class="tao-analytics-debug-value tao-analytics-debug-cache-${snapshot.overallCacheStatus}">${formatCacheStatus(snapshot.overallCacheStatus)}</p>
+            <p class="tao-analytics-debug-meta">Entry present: ${snapshot.cacheEntry ? 'yes' : 'no'}</p>
+            <p class="tao-analytics-debug-meta">updatedAt: ${snapshot.cacheUpdatedAt ? new Date(snapshot.cacheUpdatedAt).toLocaleString() : '—'}</p>
+          </div>
+          <div class="tao-analytics-debug-card">
+            <h3>Page state</h3>
+            <p class="tao-analytics-debug-meta">Table: ${snapshot.tableFound ? 'found' : 'missing'}</p>
+            <p class="tao-analytics-debug-meta">Incentive sorted ↓: ${snapshot.incentiveSortedDesc ? 'yes' : 'no'}</p>
+            <p class="tao-analytics-debug-meta">Page ready: ${snapshot.pageReady ? 'yes' : 'no'}</p>
+          </div>
+        </div>
+        <div class="tao-analytics-debug-section">
+          <div class="tao-analytics-debug-section-head">
+            <h3>Incentive table sample</h3>
+            <span class="tao-analytics-debug-chip">${snapshot.tableSample.length} rows</span>
+          </div>
+          <div class="tao-analytics-debug-table-wrap">
+            <table class="tao-analytics-debug-table">
+              <thead>
+                <tr>
+                  <th>UID</th>
+                  <th>Incentive</th>
+                  <th>Emission</th>
+                  <th>Owner</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${snapshot.tableSample
+                  .map(
+                    (row) => `
+                  <tr class="${row.isOwner ? 'is-owner' : ''}">
+                    <td>${row.uid || '—'}</td>
+                    <td class="${row.hasFlame ? 'has-flame' : ''}">${row.incentiveText || formatDebugValue(row.incentive)}</td>
+                    <td>${row.emission || '—'}</td>
+                    <td>${row.isOwner ? 'yes' : 'no'}</td>
+                  </tr>`
+                  )
+                  .join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <details class="tao-analytics-debug-details">
+          <summary>Raw cache entry &amp; JSON</summary>
+          <pre class="tao-analytics-debug-pre">${formatDebugValue(snapshot.cacheEntry)}</pre>
+        </details>
+        <details class="tao-analytics-debug-details">
+          <summary>Full debug snapshot</summary>
+          <pre class="tao-analytics-debug-pre">${formatDebugValue(snapshot)}</pre>
+        </details>
+      </div>
+      <div class="tao-analytics-debug-modal-footer">
+        <button type="button" class="tao-analytics-debug-btn" data-copy="1">Copy JSON</button>
+        <button type="button" class="tao-analytics-debug-btn tao-analytics-debug-btn-primary" data-close="1">Close</button>
+      </div>
+    </div>
+  `;
+
+  host.querySelectorAll('[data-close]').forEach((el) => {
+    el.addEventListener('click', hideMetagraphScrapeDebugModal);
+  });
+
+  host.querySelector('[data-copy]')?.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(snapshot, null, 2));
+    } catch {
+      // Ignore clipboard failures.
+    }
+  });
+
+  document.documentElement.classList.add('tao-analytics-debug-modal-open');
+  document.body.appendChild(host);
+  metagraphDebugModalHost = host;
+}
+
+function maybeShowMetagraphScrapeDebugModal(netuid, scrapeDetails) {
+  if (!metagraphScrapeDebug) {
+    return;
+  }
+
+  const signature = [
+    scrapeDetails.ownerIncentive,
+    scrapeDetails.minerCount,
+    (scrapeDetails.topEmissions || []).join(','),
+    scrapeDetails.overallCacheStatus,
+    scrapeDetails.cacheEntry?.updatedAt ?? '',
+  ].join('|');
+
+  if (signature === lastMetagraphDebugSignature) {
+    return;
+  }
+
+  lastMetagraphDebugSignature = signature;
+  showMetagraphScrapeDebugModal(buildMetagraphScrapeDebugSnapshot(netuid, scrapeDetails));
+}
+
+function buildAboutScrapeDebugSnapshot(netuid, scrapeDetails = {}) {
+  const cacheEntry = scrapeDetails.cacheEntry ?? null;
+  const feeData = cacheEntry ?? {
+    burnTao: scrapeDetails.burnTao,
+    burnUsd: scrapeDetails.burnUsd,
+    taoUsd: scrapeDetails.taoUsd,
+  };
+  const regDisplay = formatRegFeeDisplay(feeData, scrapeDetails.taoUsd ?? cacheEntry?.taoUsd);
+
+  return {
+    netuid: Number(netuid),
+    href: location.href,
+    tab: 'about',
+    scrapedAt: new Date().toISOString(),
+    pageReady: isAboutScrapePageReady(),
+    labelFound: Boolean(scrapeDetails.labelFound),
+    valueText: scrapeDetails.valueText ?? null,
+    burnTao: scrapeDetails.burnTao ?? cacheEntry?.burnTao ?? null,
+    burnUsd: scrapeDetails.burnUsd ?? cacheEntry?.burnUsd ?? null,
+    taoUsd: scrapeDetails.taoUsd ?? cacheEntry?.taoUsd ?? null,
+    regFeeDisplay: regDisplay.text,
+    regFeeTitle: regDisplay.title,
+    regCacheStatus: scrapeDetails.regCacheStatus ?? 'unknown',
+    cacheEntry,
+    cacheUpdatedAt: cacheEntry?.updatedAt ?? null,
+    source: scrapeDetails.source ?? null,
+    diagnostics: scrapeDetails.diagnostics ?? {},
+  };
+}
+
+function showAboutScrapeDebugModal(snapshot) {
+  if (!metagraphScrapeDebug || document.visibilityState === 'hidden') {
+    return;
+  }
+
+  hideMetagraphScrapeDebugModal();
+
+  const host = document.createElement('div');
+  host.className = 'tao-analytics-debug-modal-host';
+  host.innerHTML = `
+    <div class="tao-analytics-debug-modal-backdrop" data-close="1"></div>
+    <div class="tao-analytics-debug-modal" role="dialog" aria-labelledby="tao-analytics-about-debug-title">
+      <div class="tao-analytics-debug-modal-header">
+        <div>
+          <p class="tao-analytics-debug-eyebrow">About scrape debug</p>
+          <h2 id="tao-analytics-about-debug-title">Subnet ${snapshot.netuid} reg fee scrape ${snapshot.labelFound ? 'succeeded' : 'incomplete'}</h2>
+        </div>
+        <button type="button" class="tao-analytics-debug-close" aria-label="Close">×</button>
+      </div>
+      <div class="tao-analytics-debug-modal-body">
+        <div class="tao-analytics-debug-grid tao-analytics-debug-grid-about">
+          <div class="tao-analytics-debug-card">
+            <h3>Registration fee</h3>
+            <p class="tao-analytics-debug-value">${snapshot.regFeeDisplay}</p>
+            <p class="tao-analytics-debug-meta">DOM value: ${formatDebugValue(snapshot.valueText)}</p>
+            <p class="tao-analytics-debug-meta">burnTao: ${formatDebugValue(snapshot.burnTao)}</p>
+            <p class="tao-analytics-debug-meta">burnUsd: ${formatDebugValue(snapshot.burnUsd)}</p>
+          </div>
+          <div class="tao-analytics-debug-card">
+            <h3>Cache</h3>
+            <p class="tao-analytics-debug-value tao-analytics-debug-cache-${snapshot.regCacheStatus}">${formatCacheStatus(snapshot.regCacheStatus)}</p>
+            <p class="tao-analytics-debug-meta">Entry present: ${snapshot.cacheEntry ? 'yes' : 'no'}</p>
+            <p class="tao-analytics-debug-meta">updatedAt: ${snapshot.cacheUpdatedAt ? new Date(snapshot.cacheUpdatedAt).toLocaleString() : '—'}</p>
+          </div>
+          <div class="tao-analytics-debug-card">
+            <h3>Page state</h3>
+            <p class="tao-analytics-debug-meta">Reg label found: ${snapshot.labelFound ? 'yes' : 'no'}</p>
+            <p class="tao-analytics-debug-meta">Page ready: ${snapshot.pageReady ? 'yes' : 'no'}</p>
+            <p class="tao-analytics-debug-meta">Source: ${snapshot.source || '—'}</p>
+            <p class="tao-analytics-debug-meta">taoUsd: ${formatDebugValue(snapshot.taoUsd)}</p>
+          </div>
+        </div>
+        <details class="tao-analytics-debug-details">
+          <summary>Raw cache entry &amp; JSON</summary>
+          <pre class="tao-analytics-debug-pre">${formatDebugValue(snapshot.cacheEntry)}</pre>
+        </details>
+        <details class="tao-analytics-debug-details">
+          <summary>Full debug snapshot</summary>
+          <pre class="tao-analytics-debug-pre">${formatDebugValue(snapshot)}</pre>
+        </details>
+      </div>
+      <div class="tao-analytics-debug-modal-footer">
+        <button type="button" class="tao-analytics-debug-btn" data-copy="1">Copy JSON</button>
+        <button type="button" class="tao-analytics-debug-btn tao-analytics-debug-btn-primary" data-close="1">Close</button>
+      </div>
+    </div>
+  `;
+
+  host.querySelectorAll('[data-close]').forEach((el) => {
+    el.addEventListener('click', hideMetagraphScrapeDebugModal);
+  });
+
+  host.querySelector('[data-copy]')?.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(snapshot, null, 2));
+    } catch {
+      // Ignore clipboard failures.
+    }
+  });
+
+  document.documentElement.classList.add('tao-analytics-debug-modal-open');
+  document.body.appendChild(host);
+  metagraphDebugModalHost = host;
+}
+
+function maybeShowAboutScrapeDebugModal(netuid, scrapeDetails) {
+  if (!metagraphScrapeDebug) {
+    return;
+  }
+
+  const signature = [
+    scrapeDetails.valueText,
+    scrapeDetails.burnTao,
+    scrapeDetails.burnUsd,
+    scrapeDetails.regCacheStatus,
+    scrapeDetails.cacheEntry?.updatedAt ?? '',
+  ].join('|');
+
+  if (signature === lastAboutDebugSignature) {
+    return;
+  }
+
+  lastAboutDebugSignature = signature;
+  showAboutScrapeDebugModal(buildAboutScrapeDebugSnapshot(netuid, scrapeDetails));
+}
+
+async function loadMetagraphScrapeDebugPreference() {
+  const stored = await getSyncStorage(METagraph_SCRAPE_DEBUG_KEY);
+  metagraphScrapeDebug = stored?.[METagraph_SCRAPE_DEBUG_KEY] === true;
+  document.documentElement.dataset.taoAnalyticsMetagraphDebug = metagraphScrapeDebug ? 'on' : 'off';
+}
+
+function bindMetagraphScrapeDebugPreferenceListener() {
+  if (bindMetagraphScrapeDebugPreferenceListener.bound) {
+    return;
+  }
+
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'sync' || !changes?.[METagraph_SCRAPE_DEBUG_KEY]) {
+      return;
+    }
+
+    metagraphScrapeDebug = changes[METagraph_SCRAPE_DEBUG_KEY].newValue === true;
+    document.documentElement.dataset.taoAnalyticsMetagraphDebug = metagraphScrapeDebug ? 'on' : 'off';
+    if (!metagraphScrapeDebug) {
+      hideMetagraphScrapeDebugModal();
+    }
+  });
+
+  bindMetagraphScrapeDebugPreferenceListener.bound = true;
 }
 
 function parseIncentiveCellValue(text) {
@@ -1253,7 +1853,7 @@ function collectPositiveIncentiveUidsFromMetagraphPage(tableInfo) {
     }
 
     const cells = [...row.querySelectorAll('td')];
-    const uid = parseNetuid(cells[tableInfo.uidIdx]?.textContent);
+    const uid = parseMinerUid(cells[tableInfo.uidIdx]?.textContent);
     const incentive = parseIncentiveCellValue(cells[tableInfo.incentiveIdx]?.textContent);
 
     if (uid != null && incentive != null && incentive > 0) {
@@ -1383,11 +1983,6 @@ async function collectIncentiveMinerCountFromMetagraphTable() {
 }
 
 function collectOwnerIncentiveFromDom() {
-  const tableInfo = findMetagraphTable();
-  if (tableInfo && !isMetagraphIncentiveSortedDesc(tableInfo)) {
-    return null;
-  }
-
   let best = null;
 
   const rows = document.querySelectorAll('div.flex.items-center.justify-between');
@@ -1446,8 +2041,12 @@ function collectOwnerIncentiveFromDom() {
     return best;
   }
 
+  if (!isMetagraphTabActive()) {
+    return null;
+  }
+
   // On metagraph: no yellow/orange owner incentive visible → burn rate is 0.
-  if (isMetagraphBurnPageReady()) {
+  if (isMetagraphScrapePageReady()) {
     const readyTable = findMetagraphTable();
     if (readyTable && !isMetagraphIncentiveSortedDesc(readyTable)) {
       return null;
@@ -1471,7 +2070,15 @@ function matchesRegCostLabel(text) {
 async function upsertRegFeePatch(netuid, valueText, lastRegSignatureRef) {
   const value = parseMoneyLikeNumber(valueText);
   if (value == null) {
-    return false;
+    return {
+      ok: false,
+      cacheStatus: 'missing',
+      reason: 'parse_failed',
+      valueText,
+      burnTao: null,
+      burnUsd: null,
+      taoUsd: scrapeTaoUsdPrice(),
+    };
   }
 
   const currency = detectCurrency(valueText);
@@ -1485,35 +2092,70 @@ async function upsertRegFeePatch(netuid, valueText, lastRegSignatureRef) {
         : null;
 
   if (burnUsd == null && burnTao == null) {
-    return false;
+    return {
+      ok: false,
+      cacheStatus: 'missing',
+      reason: 'currency_unknown',
+      valueText,
+      burnTao: null,
+      burnUsd: null,
+      taoUsd,
+    };
   }
 
   const signature = `${burnTao}:${burnUsd}:${taoUsd}`;
 
   if (signature === lastRegSignatureRef.value) {
-    return true;
+    return {
+      ok: true,
+      cacheStatus: 'unchanged',
+      valueText,
+      burnTao,
+      burnUsd,
+      taoUsd,
+      cacheEntry: await resolveCacheEntryForNetuid(netuid),
+    };
   }
 
   lastRegSignatureRef.value = signature;
-  await upsertMetricCache(netuid, {
+  const patch = {
     burnTao,
-    burnRao: Math.round(burnTao * 1_000_000_000),
     burnUsd,
     taoUsd,
     source: 'dom',
     domCapturedAt: Date.now(),
-  });
-  return true;
+  };
+  if (burnTao != null && Number.isFinite(burnTao)) {
+    patch.burnRao = Math.round(burnTao * 1_000_000_000);
+  }
+
+  const upsert = await upsertMetricCache(netuid, patch);
+  if (upsert?.ok) {
+    return {
+      ok: true,
+      cacheStatus: 'updated',
+      valueText,
+      burnTao,
+      burnUsd,
+      taoUsd,
+      cacheEntry: upsert.entry ?? (await resolveCacheEntryForNetuid(netuid)),
+    };
+  }
+
+  return {
+    ok: false,
+    cacheStatus: 'failed',
+    valueText,
+    burnTao,
+    burnUsd,
+    taoUsd,
+    cacheEntry: await resolveCacheEntryForNetuid(netuid),
+  };
 }
 
 function getActiveSubnetTab() {
   const tab = new URLSearchParams(location.search).get('active_tab');
   return tab ? tab.toLowerCase() : null;
-}
-
-function isAboutSubnetTab() {
-  const activeTab = getActiveSubnetTab();
-  return activeTab == null || activeTab === 'about';
 }
 
 const SUBNET_TAB_LABELS = new Set([
@@ -1526,6 +2168,39 @@ const SUBNET_TAB_LABELS = new Set([
   'Transactions',
   'Volume',
 ]);
+
+function getEffectiveActiveSubnetTab() {
+  const activeTabBtn = document.querySelector('[role="tablist"] [role="tab"][data-state="active"]');
+  if (activeTabBtn instanceof HTMLElement) {
+    const label = normalizeText(activeTabBtn.textContent);
+    if (SUBNET_TAB_LABELS.has(label)) {
+      return label.toLowerCase();
+    }
+
+    const id = activeTabBtn.id || '';
+    if (/metagraph/i.test(id)) {
+      return 'metagraph';
+    }
+    if (/about/i.test(id)) {
+      return 'about';
+    }
+  }
+
+  const urlTab = getActiveSubnetTab();
+  if (urlTab) {
+    return urlTab;
+  }
+
+  return 'about';
+}
+
+function isAboutSubnetTab() {
+  return getEffectiveActiveSubnetTab() === 'about';
+}
+
+function isMetagraphTabActive() {
+  return getEffectiveActiveSubnetTab() === 'metagraph';
+}
 
 function buildSubnetPageQuery() {
   const activeTab = new URLSearchParams(location.search).get('active_tab');
@@ -1697,20 +2372,6 @@ function findSubnetToolbarRow() {
   }
 
   return { row, form, tabHost };
-}
-
-function isMetagraphTabActive() {
-  const activeTab = document.querySelector('[role="tablist"] [role="tab"][data-state="active"]');
-  if (activeTab instanceof HTMLElement) {
-    const id = activeTab.id || '';
-    const label = normalizeText(activeTab.textContent);
-    if (/metagraph/i.test(id) || label === 'Metagraph') {
-      return true;
-    }
-    return false;
-  }
-
-  return getActiveSubnetTab() === 'metagraph';
 }
 
 function findActiveMetagraphTabTrigger() {
@@ -3336,13 +3997,10 @@ function enhanceRow(row, tableInfo, styleRef, taoUsdPrice) {
   }
 
   const data = metrics.get(netuid);
-  const taoUsd = taoUsdPrice ?? data?.taoUsd ?? null;
-  const feeUsd =
-    data?.burnUsd != null
-      ? Number(data.burnUsd)
-      : (data?.burnTao != null && taoUsd ? Number(data.burnTao) * taoUsd : null);
-
-  const feeText = data ? formatUsd(feeUsd) : '—';
+  const taoUsd = taoUsdPrice ?? data?.taoUsd ?? scrapeTaoUsdPrice() ?? null;
+  const regFee = formatRegFeeDisplay(data, taoUsd);
+  const feeText = data ? regFee.text : '—';
+  const feeTitle = data ? regFee.title : 'Loading registration fee';
   const burnKnown = isBurnRateKnown(data);
   const burnRate = burnKnown ? getBurnRateFromData(data) : null;
   const burnVisual = getBurnVisualState(data, burnRate);
@@ -3354,9 +4012,6 @@ function enhanceRow(row, tableInfo, styleRef, taoUsdPrice) {
         ? `Burn rate: ${burnDisplay} (full)`
         : `Burn rate: ${burnDisplay}`)
       : 'Burn rate unknown — click sync to load';
-  const feeTitle = data
-    ? `Registration fee: ${feeUsd != null ? formatUsd(feeUsd) : '—'}`
-    : 'Loading registration fee';
   const minerCount = getIncentiveMinerCountFromData(data);
   const topEmissions = getTopMinerEmissionsFromData(data);
   const minersText = data ? formatMinerCount(minerCount, topEmissions) : '—';
@@ -3490,13 +4145,13 @@ function observeDom() {
   }
 }
 
-function scheduleTableEnhance({ reloadCache = false } = {}) {
+function scheduleTableEnhance({ reloadCache = false, delayMs = ENHANCE_DEBOUNCE_MS } = {}) {
   if (reloadCache) {
     pendingCacheReload = true;
   }
 
   if (enhanceDebounceTimer != null) {
-    return;
+    clearTimeout(enhanceDebounceTimer);
   }
 
   enhanceDebounceTimer = setTimeout(async () => {
@@ -3525,11 +4180,14 @@ function scheduleTableEnhance({ reloadCache = false } = {}) {
     } finally {
       isEnhancing = false;
     }
-  }, ENHANCE_DEBOUNCE_MS);
+  }, delayMs);
 }
 
-function scheduleCacheEnhance() {
-  scheduleTableEnhance({ reloadCache: true });
+function scheduleCacheEnhance({ immediate = false } = {}) {
+  scheduleTableEnhance({
+    reloadCache: true,
+    delayMs: immediate ? ENHANCE_IMMEDIATE_MS : ENHANCE_DEBOUNCE_MS,
+  });
 }
 
 function scheduleEnhance() {
@@ -3542,26 +4200,32 @@ async function refreshMetricsAndEnhance(force = false) {
     return;
   }
 
+  try {
+    await loadMetricsFromLocalCache(tableInfo);
+  } catch {
+    // Ignore cache read errors; we'll still attempt background fetch.
+  }
+
   isEnhancing = true;
   try {
     enhanceTable(tableInfo);
-
-    try {
-      await loadMetricsFromLocalCache(tableInfo);
-      enhanceTable(tableInfo);
-    } catch {
-      // Ignore cache read errors; we'll still attempt background fetch.
-    }
   } finally {
     isEnhancing = false;
   }
 
   requestMetrics(tableInfo, force)
-    .then(() => {
+    .then(async () => {
       const latest = findSubnetTable();
       if (!latest) {
         return;
       }
+
+      try {
+        await loadMetricsFromLocalCache(latest);
+      } catch {
+        // Ignore cache read errors.
+      }
+
       isEnhancing = true;
       try {
         enhanceTable(latest);
@@ -3584,6 +4248,8 @@ async function init() {
 
   await loadHideSubnetTradingViewPreference();
   initSubnetTradingViewHider();
+  await loadMetagraphScrapeDebugPreference();
+  bindMetagraphScrapeDebugPreferenceListener();
 
   if (isSubnetPage()) {
     initSubnetPageScrape();
@@ -3607,19 +4273,20 @@ async function init() {
     if (areaName !== 'local') return;
 
     if (changes?.[STORAGE_CACHE_KEY]) {
-      scheduleCacheEnhance();
+      scheduleCacheEnhance({ immediate: true });
     }
 
     if (changes?.[SYNC_STATUS_KEY]) {
       applySyncStatus(changes[SYNC_STATUS_KEY].newValue);
-      scheduleTableEnhance();
+      scheduleCacheEnhance({ immediate: true });
     }
   });
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === MESSAGE.METRICS_REFRESH) {
-      scheduleCacheEnhance();
+      handleMetricsRefreshMessage(message);
     }
+    return false;
   });
 
   let attempts = 0;
@@ -3655,12 +4322,30 @@ function initSubnetPageScrape() {
   let lastTopMinerEmissions = null;
   const lastRegSignatureRef = { value: null };
   let lastHref = location.href;
+  let lastEffectiveTab = getEffectiveActiveSubnetTab();
   let scrapeReadyTimer = null;
   let contextWatch = null;
   let observer = null;
   let urlWatcher = null;
+  let tabStateWatcher = null;
   let burst = null;
-  let metagraphScrapePromise = null;
+
+  let metagraphScrapeChain = Promise.resolve();
+  let aboutScrapeChain = Promise.resolve();
+
+  const resetScrapeDedupState = () => {
+    lastOwnerIncentive = null;
+    lastIncentiveMinerCount = null;
+    lastTopMinerEmissions = null;
+    lastRegSignatureRef.value = null;
+    lastMetagraphDebugSignature = null;
+    lastAboutDebugSignature = null;
+  };
+
+  const onSubnetTabContextChange = () => {
+    resetScrapeDedupState();
+    tryScrape();
+  };
 
   const teardownSubnetScrape = () => {
     if (scrapeReadyTimer != null) {
@@ -3674,6 +4359,10 @@ function initSubnetPageScrape() {
     if (urlWatcher != null) {
       clearInterval(urlWatcher);
       urlWatcher = null;
+    }
+    if (tabStateWatcher != null) {
+      clearInterval(tabStateWatcher);
+      tabStateWatcher = null;
     }
     if (burst != null) {
       clearInterval(burst);
@@ -3705,32 +4394,63 @@ function initSubnetPageScrape() {
         netuid,
         href: location.href,
       });
-    }, 400);
+    }, 150);
   };
 
   const scrapeOwnerIncentive = async () => {
     const ownerIncentive = collectOwnerIncentiveFromDom();
     if (ownerIncentive == null) {
-      return false;
+      return {
+        success: false,
+        ownerIncentive: null,
+        ownerCacheStatus: 'missing',
+        cacheEntry: null,
+      };
     }
 
     if (ownerIncentive === lastOwnerIncentive) {
-      return true;
+      return {
+        success: true,
+        ownerIncentive,
+        ownerCacheStatus: 'unchanged',
+        cacheEntry: await resolveCacheEntryForNetuid(netuid),
+      };
     }
 
-    lastOwnerIncentive = ownerIncentive;
-    await upsertMetricCache(netuid, {
+    const upsert = await upsertMetricCache(netuid, {
       ownerIncentive,
       ownerIncentiveCapturedAt: Date.now(),
       source: 'dom',
     });
-    return true;
+
+    if (upsert?.ok) {
+      lastOwnerIncentive = ownerIncentive;
+      return {
+        success: true,
+        ownerIncentive,
+        ownerCacheStatus: 'updated',
+        cacheEntry: upsert.entry ?? (await resolveCacheEntryForNetuid(netuid)),
+      };
+    }
+
+    return {
+      success: true,
+      ownerIncentive,
+      ownerCacheStatus: 'failed',
+      cacheEntry: await resolveCacheEntryForNetuid(netuid),
+    };
   };
 
   const scrapeIncentiveMinerCount = async () => {
     const minerMetrics = await collectIncentiveMinerCountFromMetagraphTable();
     if (minerMetrics == null || minerMetrics.count == null) {
-      return false;
+      return {
+        success: false,
+        minerCount: null,
+        topEmissions: null,
+        minersCacheStatus: 'missing',
+        cacheEntry: null,
+      };
     }
 
     const { count: minerCount, topEmissions } = minerMetrics;
@@ -3738,28 +4458,68 @@ function initSubnetPageScrape() {
       minerCount === lastIncentiveMinerCount &&
       topMinerEmissionsEqual(topEmissions, lastTopMinerEmissions)
     ) {
-      return true;
+      return {
+        success: true,
+        minerCount,
+        topEmissions,
+        minersCacheStatus: 'unchanged',
+        cacheEntry: await resolveCacheEntryForNetuid(netuid),
+      };
     }
 
-    lastIncentiveMinerCount = minerCount;
-    lastTopMinerEmissions = topEmissions;
-    await upsertMetricCache(netuid, {
+    const upsert = await upsertMetricCache(netuid, {
       incentiveMinerCount: minerCount,
       topMinerEmissions: topEmissions,
       incentiveMinerCountCapturedAt: Date.now(),
       source: 'dom',
     });
-    return true;
-  };
 
-  const scrapeMetagraphMetrics = async () => {
-    let scraped = false;
-    scraped = (await scrapeIncentiveMinerCount()) || scraped;
-    scraped = (await scrapeOwnerIncentive()) || scraped;
-    return scraped;
+    if (upsert?.ok) {
+      lastIncentiveMinerCount = minerCount;
+      lastTopMinerEmissions = topEmissions;
+      return {
+        success: true,
+        minerCount,
+        topEmissions,
+        minersCacheStatus: 'updated',
+        cacheEntry: upsert.entry ?? (await resolveCacheEntryForNetuid(netuid)),
+      };
+    }
+
+    return {
+      success: true,
+      minerCount,
+      topEmissions,
+      minersCacheStatus: 'failed',
+      cacheEntry: await resolveCacheEntryForNetuid(netuid),
+    };
   };
 
   const scrapeRegFee = async () => {
+    const finalizeRegFeeResult = async (result, source) => {
+      if (!result) {
+        return null;
+      }
+
+      const cacheEntry =
+        result.cacheEntry ?? (await resolveCacheEntryForNetuid(netuid));
+
+      return {
+        success: result.cacheStatus === 'updated' || result.cacheStatus === 'unchanged',
+        labelFound: true,
+        valueText: result.valueText ?? null,
+        burnTao: result.burnTao ?? null,
+        burnUsd: result.burnUsd ?? null,
+        taoUsd: result.taoUsd ?? null,
+        regCacheStatus: result.cacheStatus ?? 'unknown',
+        cacheEntry,
+        source,
+        diagnostics: {
+          reason: result.reason ?? null,
+        },
+      };
+    };
+
     // tao.app PARAMETERS panel: label + value in a flex row (label has info button).
     const rows = document.querySelectorAll('div.flex.items-center.justify-between');
     for (const row of rows) {
@@ -3778,8 +4538,12 @@ function initSubnetPageScrape() {
         row.querySelector(':scope > .text-sm.font-bold') ||
         children[children.length - 1];
       const valueText = normalizeText(valueEl?.textContent ?? '');
-      if (await upsertRegFeePatch(netuid, valueText, lastRegSignatureRef)) {
-        return true;
+      const result = await finalizeRegFeeResult(
+        await upsertRegFeePatch(netuid, valueText, lastRegSignatureRef),
+        'parameters_panel'
+      );
+      if (result) {
+        return result;
       }
     }
 
@@ -3802,12 +4566,29 @@ function initSubnetPageScrape() {
         row.querySelector('.text-sm.font-bold') ||
         row.lastElementChild;
       const valueText = normalizeText(valueEl?.textContent ?? '');
-      if (await upsertRegFeePatch(netuid, valueText, lastRegSignatureRef)) {
-        return true;
+      const result = await finalizeRegFeeResult(
+        await upsertRegFeePatch(netuid, valueText, lastRegSignatureRef),
+        'legacy_layout'
+      );
+      if (result) {
+        return result;
       }
     }
 
-    return false;
+    return {
+      success: false,
+      labelFound: false,
+      valueText: null,
+      burnTao: null,
+      burnUsd: null,
+      taoUsd: scrapeTaoUsdPrice(),
+      regCacheStatus: 'missing',
+      cacheEntry: await resolveCacheEntryForNetuid(netuid),
+      source: null,
+      diagnostics: {
+        reason: 'reg_label_not_found',
+      },
+    };
   };
 
   const tryScrape = async () => {
@@ -3816,27 +4597,75 @@ function initSubnetPageScrape() {
       return;
     }
 
-    const activeTab = getActiveSubnetTab();
+    const effectiveTab = getEffectiveActiveSubnetTab();
     let scraped = false;
 
-    if (activeTab === 'metagraph') {
-      if (!metagraphScrapePromise) {
-        metagraphScrapePromise = scrapeMetagraphMetrics().finally(() => {
-          metagraphScrapePromise = null;
-        });
-      }
-      scraped = (await metagraphScrapePromise) || scraped;
-      if (scraped || isMetagraphScrapePageReady()) {
-        notifyScrapeReady();
-      }
+    if (effectiveTab === 'metagraph') {
+      metagraphScrapeChain = metagraphScrapeChain
+        .then(async () => {
+          if (!isExtensionContextValid() || getEffectiveActiveSubnetTab() !== 'metagraph') {
+            return;
+          }
+
+          const ownerResult = await scrapeOwnerIncentive();
+          const minerResult = await scrapeIncentiveMinerCount();
+          const scraped = ownerResult.success || minerResult.success;
+          const cacheEntry =
+            minerResult.cacheEntry ??
+            ownerResult.cacheEntry ??
+            (await resolveCacheEntryForNetuid(netuid));
+          const overallCacheStatus = deriveOverallCacheStatus({
+            ownerCacheStatus: ownerResult.ownerCacheStatus,
+            minersCacheStatus: minerResult.minersCacheStatus,
+            cacheEntry,
+          });
+
+          if (scraped && (ownerResult.success || minerResult.success)) {
+            maybeShowMetagraphScrapeDebugModal(netuid, {
+              ownerIncentive: ownerResult.ownerIncentive,
+              ownerCacheStatus: ownerResult.ownerCacheStatus,
+              minerCount: minerResult.minerCount,
+              topEmissions: minerResult.topEmissions,
+              minersCacheStatus: minerResult.minersCacheStatus,
+              overallCacheStatus,
+              cacheEntry,
+              diagnostics: {
+                ownerSuccess: ownerResult.success,
+                minersSuccess: minerResult.success,
+              },
+            });
+          }
+
+          if (scraped || isMetagraphScrapePageReady()) {
+            notifyScrapeReady();
+          }
+        })
+        .catch(() => {});
+
       return;
     }
 
-    if (isAboutSubnetTab()) {
-      scraped = (await scrapeRegFee()) || scraped;
-      if (scraped) {
-        notifyScrapeReady();
-      }
+    if (effectiveTab === 'about') {
+      aboutScrapeChain = aboutScrapeChain
+        .then(async () => {
+          if (!isExtensionContextValid() || getEffectiveActiveSubnetTab() !== 'about') {
+            return;
+          }
+
+          const regResult = await scrapeRegFee();
+          const scraped = regResult.success || regResult.labelFound;
+
+          if (regResult.labelFound || isAboutScrapePageReady()) {
+            maybeShowAboutScrapeDebugModal(netuid, regResult);
+          }
+
+          if (scraped || isAboutScrapePageReady()) {
+            notifyScrapeReady();
+          }
+        })
+        .catch(() => {});
+
+      return;
     }
   };
 
@@ -3868,11 +4697,35 @@ function initSubnetPageScrape() {
     }
 
     lastHref = location.href;
-    lastOwnerIncentive = null;
-    lastIncentiveMinerCount = null;
-    lastRegSignatureRef.value = null;
-    tryScrape();
+    onSubnetTabContextChange();
   }, 400);
+
+  tabStateWatcher = setInterval(() => {
+    if (!isExtensionContextValid()) {
+      teardownSubnetScrape();
+      return;
+    }
+
+    const effectiveTab = getEffectiveActiveSubnetTab();
+    if (effectiveTab === lastEffectiveTab) {
+      return;
+    }
+
+    lastEffectiveTab = effectiveTab;
+    onSubnetTabContextChange();
+  }, 400);
+
+  document.addEventListener(
+    'click',
+    (event) => {
+      const tab = event.target.closest?.('[role="tab"]');
+      if (tab?.closest('[role="tablist"]')) {
+        setTimeout(onSubnetTabContextChange, 0);
+        setTimeout(onSubnetTabContextChange, 250);
+      }
+    },
+    true
+  );
 
   // Fast burst while the page hydrates.
   let burstAttempts = 0;

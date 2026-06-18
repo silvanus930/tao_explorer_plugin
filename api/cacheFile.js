@@ -1,7 +1,7 @@
 const CACHE_FILE_FORMAT = 'tao-subnet-analytics-cache';
 const CACHE_FILE_VERSION = 1;
 
-function sanitizeCacheMap(map) {
+function sanitizeCacheMap(map, defaultUpdatedAt = Date.now()) {
   if (!map || typeof map !== 'object' || Array.isArray(map)) {
     return null;
   }
@@ -15,7 +15,20 @@ function sanitizeCacheMap(map) {
       return;
     }
 
-    out[String(netuid)] = { ...entry, netuid };
+    const stamps = [
+      entry.updatedAt,
+      entry.cachedAt,
+      entry.domCapturedAt,
+      entry.rpcCapturedAt,
+      entry.ownerIncentiveCapturedAt,
+      entry.incentiveMinerCountCapturedAt,
+      defaultUpdatedAt,
+    ]
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value > 0);
+
+    const updatedAt = stamps.length > 0 ? Math.max(...stamps) : defaultUpdatedAt;
+    out[String(netuid)] = { ...entry, netuid, updatedAt };
     count += 1;
   });
 
@@ -27,22 +40,24 @@ function normalizeImportedCacheMap(payload) {
     return null;
   }
 
+  const defaultUpdatedAt = Number(payload.exportedAt) || Date.now();
+
   if (payload.format === CACHE_FILE_FORMAT) {
-    return sanitizeCacheMap(payload.value);
+    return sanitizeCacheMap(payload.value, defaultUpdatedAt);
   }
 
   if (payload.value && typeof payload.value === 'object' && !Array.isArray(payload.value)) {
-    const fromValue = sanitizeCacheMap(payload.value);
+    const fromValue = sanitizeCacheMap(payload.value, defaultUpdatedAt);
     if (fromValue) {
       return fromValue;
     }
   }
 
   if (payload.timestamp != null && payload.value && typeof payload.value === 'object') {
-    return sanitizeCacheMap(payload.value);
+    return sanitizeCacheMap(payload.value, Number(payload.timestamp) || defaultUpdatedAt);
   }
 
-  return sanitizeCacheMap(payload);
+  return sanitizeCacheMap(payload, defaultUpdatedAt);
 }
 
 function buildCacheExportPayload(cacheMap, meta = {}, extensionVersion = '') {

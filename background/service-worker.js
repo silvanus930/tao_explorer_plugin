@@ -1,4 +1,4 @@
-/* global decodeSubnetInfoValidated, decodeHyperparams, fetchSubnetMetrics, fetchAllSubnetRegFees, fetchSubnetFromTaoApp, normalizeTaoAppSubnet, fetchTaoUsdPrice, resolveTaoApiKey, buildRegFeeCachePatch, getCache, getCacheMeta, updateCacheEntries, getSettings, getSheetsSettings, pullCacheFromSheets, pullCacheFromPublicSheet, pushCacheToSheets, syncCacheWithSheets, createSpreadsheet, mergeCacheMaps, withGoogleToken, TAO_API_KEY, DEFAULT_SHEET_URL */
+/* global decodeSubnetInfoValidated, decodeHyperparams, fetchSubnetMetrics, fetchAllSubnetRegFees, fetchSubnetFromTaoApp, normalizeTaoAppSubnet, fetchTaoUsdPrice, resolveTaoApiKey, buildRegFeeCachePatch, getCache, getCacheMeta, updateCacheEntries, replaceCacheMap, getSettings, getSheetsSettings, pullCacheFromSheets, pullCacheFromPublicSheet, pushCacheToSheets, syncCacheWithSheets, createSpreadsheet, mergeCacheMaps, withGoogleToken, TAO_API_KEY, DEFAULT_SHEET_URL */
 
 try {
   importScripts('../config/secrets.js');
@@ -34,6 +34,7 @@ const MESSAGE = {
   GET_SYNC_STATUS: 'GET_SYNC_STATUS',
   SCRAPE_PAGE_READY: 'SCRAPE_PAGE_READY',
   METRICS_REFRESH: 'METRICS_REFRESH',
+  REQUEST_EXPLORER_REFRESH: 'REQUEST_EXPLORER_REFRESH',
   SHEETS_PUSH: 'SHEETS_PUSH',
   SHEETS_PULL: 'SHEETS_PULL',
   SHEETS_SYNC: 'SHEETS_SYNC',
@@ -44,6 +45,7 @@ const MESSAGE = {
 };
 
 let refreshPromise = null;
+let explorerRefreshTimer = null;
 let trackingEnabled = false;
 let trackingCursor = 0;
 let syncAbort = false;
@@ -54,8 +56,13 @@ const SYNC_STATUS_KEY = 'subnetSyncStatus';
 const TRACKING_NETUID_MAX = 128;
 const SCRAPE_WAIT_MS = 8_000;
 const SCRAPE_READY_TIMEOUT_MS = 30_000;
+const SYNC_TAB_LOAD_MS = 12_000;
+const SYNC_SCRAPE_READY_MS = 18_000;
+const SYNC_SCRAPE_FALLBACK_MS = 2_000;
+const SUBNET_SYNC_BUDGET_MS = 60_000;
 const SCRAPE_WINDOW_IDLE_CLOSE_MS = 120_000;
 const ABORT_POLL_MS = 200;
+const SHEETS_PUSH_TIMEOUT_MS = 20_000;
 
 function subnetPageUrl(netuid, activeTab = 'metagraph') {
   const base = `https://www.tao.app/subnets/${netuid}`;
@@ -69,15 +76,23 @@ function subnetMetagraphUrl(netuid) {
   return subnetPageUrl(netuid, 'metagraph');
 }
 
+function subnetAboutUrl(netuid) {
+  return subnetPageUrl(netuid, 'about');
+}
+
 function hrefMatchesScrapeTab(href, scrapeTab) {
   const normalized = String(href || '').toLowerCase();
   if (scrapeTab === 'metagraph') {
     return normalized.includes('active_tab=metagraph');
   }
+  if (scrapeTab === 'about') {
+    return normalized.includes('active_tab=about');
+  }
   return true;
 }
 
 let scrapeWindowId = null;
+let scrapeAboutTabId = null;
 let scrapeMetagraphTabId = null;
 let scrapeWindowCloseTimer = null;
 
@@ -154,12 +169,13 @@ async function applyBulkRegFees(netuids, settings, ttl) {
   burns.forEach((metric, netuid) => {
     const patch = buildRegFeeCachePatch(metric, taoUsd);
     if (patch) {
-      updates[netuid] = patch;
+      updates[String(netuid)] = patch;
     }
   });
 
   if (Object.keys(updates).length > 0) {
     await updateCacheEntries(updates, ttl);
+    scheduleExplorerRefresh();
   }
 
   return Object.keys(updates).length;
@@ -261,6 +277,7 @@ async function getScrapeWindow() {
       return scrapeWindowId;
     } catch {
       scrapeWindowId = null;
+      scrapeAboutTabId = null;
       scrapeMetagraphTabId = null;
     }
   }
@@ -275,29 +292,22 @@ async function getScrapeWindow() {
   return scrapeWindowId;
 }
 
-async function ensureMetagraphScrapeTab() {
+async function ensureScrapeTab(getId, setId) {
   const windowId = await getScrapeWindow();
   if (windowId == null) {
     return null;
   }
 
-  if (scrapeMetagraphTabId != null) {
+  const cachedId = getId();
+  if (cachedId != null) {
     try {
-      await chrome.tabs.get(scrapeMetagraphTabId);
-      return scrapeMetagraphTabId;
+      const tab = await chrome.tabs.get(cachedId);
+      if (tab.windowId === windowId) {
+        return cachedId;
+      }
     } catch {
-      scrapeMetagraphTabId = null;
+      setId(null);
     }
-  }
-
-  const tabs = await chrome.tabs.query({ windowId });
-  const existing = tabs
-    .filter((tab) => tab.id != null)
-    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))[0];
-
-  if (existing?.id != null) {
-    scrapeMetagraphTabId = existing.id;
-    return scrapeMetagraphTabId;
   }
 
   const tab = await chrome.tabs.create({
@@ -305,8 +315,27 @@ async function ensureMetagraphScrapeTab() {
     url: 'about:blank',
     active: false,
   });
-  scrapeMetagraphTabId = tab.id ?? null;
-  return scrapeMetagraphTabId;
+  const id = tab.id ?? null;
+  setId(id);
+  return id;
+}
+
+async function ensureAboutScrapeTab() {
+  return ensureScrapeTab(
+    () => scrapeAboutTabId,
+    (id) => {
+      scrapeAboutTabId = id;
+    }
+  );
+}
+
+async function ensureMetagraphScrapeTab() {
+  return ensureScrapeTab(
+    () => scrapeMetagraphTabId,
+    (id) => {
+      scrapeMetagraphTabId = id;
+    }
+  );
 }
 
 async function closeScrapeWindow() {
@@ -327,6 +356,7 @@ async function closeScrapeWindow() {
   }
 
   scrapeWindowId = null;
+  scrapeAboutTabId = null;
   scrapeMetagraphTabId = null;
 }
 
@@ -352,7 +382,7 @@ function cancelScrapeWindowClose() {
   }
 }
 
-async function notifyExplorerRefresh() {
+async function notifyExplorerRefresh(payload = {}) {
   const tabs = await chrome.tabs.query({
     url: ['https://www.tao.app/explorer*', 'https://tao.app/explorer*'],
   });
@@ -362,33 +392,99 @@ async function notifyExplorerRefresh() {
       if (tab.id == null) {
         return Promise.resolve();
       }
-      return chrome.tabs.sendMessage(tab.id, { type: MESSAGE.METRICS_REFRESH }).catch(() => {});
+      return chrome.tabs
+        .sendMessage(tab.id, {
+          type: MESSAGE.METRICS_REFRESH,
+          ...payload,
+        })
+        .catch(() => {});
     })
   );
 }
 
-async function scrapeUrlInTab(tabId, url, netuid, scrapeTab = null) {
+async function notifyExplorerMetricsUpdate(netuid, entry) {
+  if (netuid == null || !entry || typeof entry !== 'object') {
+    await notifyExplorerRefresh();
+    return;
+  }
+
+  await notifyExplorerRefresh({
+    netuid: Number(netuid),
+    entry,
+  });
+}
+
+function scheduleExplorerRefresh(payload = {}) {
+  if (explorerRefreshTimer) {
+    clearTimeout(explorerRefreshTimer);
+  }
+
+  if (payload.netuid != null && payload.entry) {
+    notifyExplorerMetricsUpdate(payload.netuid, payload.entry).catch(() => {});
+    return;
+  }
+
+  explorerRefreshTimer = setTimeout(() => {
+    explorerRefreshTimer = null;
+    notifyExplorerRefresh().catch(() => {});
+  }, 0);
+}
+
+async function withTimeout(promise, timeoutMs, label = 'operation') {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function runSheetsPushAfterSync() {
+  try {
+    await withTimeout(
+      runSheetsPush({ interactive: false }),
+      SHEETS_PUSH_TIMEOUT_MS,
+      'Sheets push after sync'
+    );
+  } catch {
+    // Sync results stay in local cache even if push fails or times out.
+  }
+}
+
+async function scrapeUrlInTab(tabId, url, netuid, scrapeTab = null, timeouts = {}) {
   if (syncAbort || tabId == null) {
     return false;
   }
 
+  const tabLoadMs = timeouts.tabLoadMs ?? 25_000;
+  const scrapeReadyMs = timeouts.scrapeReadyMs ?? SCRAPE_READY_TIMEOUT_MS;
+  const scrapeWaitMs = timeouts.scrapeWaitMs ?? SCRAPE_WAIT_MS;
+
   cancelScrapeWindowClose();
 
   try {
-    // Same navigation model as subnet Prev/Next: one tab, update URL in place.
-    await chrome.tabs.update(tabId, { url, active: false });
-    await waitForTabComplete(tabId, 25_000);
+    await chrome.tabs.update(tabId, { url, active: true });
+    await waitForTabComplete(tabId, tabLoadMs);
     if (syncAbort) {
       return false;
     }
 
-    const ready = await waitForUrlScrape(tabId, netuid, scrapeTab);
+    const ready = await waitForUrlScrape(tabId, netuid, scrapeTab, scrapeReadyMs);
     if (syncAbort) {
       return false;
     }
 
     if (!ready) {
-      await waitDelayAbortable(SCRAPE_WAIT_MS);
+      await waitDelayAbortable(scrapeWaitMs);
     }
 
     return true;
@@ -397,25 +493,68 @@ async function scrapeUrlInTab(tabId, url, netuid, scrapeTab = null) {
   }
 }
 
-async function scrapeSubnetInHiddenTab(netuid, { metagraph = false } = {}) {
-  if (!metagraph) {
-    return;
+async function scrapeSubnetInHiddenTab(
+  netuid,
+  { about = true, metagraph = true } = {},
+  budgetMs = SUBNET_SYNC_BUDGET_MS
+) {
+  const started = Date.now();
+  const timeLeft = () => Math.max(0, budgetMs - (Date.now() - started));
+
+  const buildTimeouts = () => ({
+    tabLoadMs: Math.min(SYNC_TAB_LOAD_MS, Math.max(3_000, timeLeft())),
+    scrapeReadyMs: Math.min(SYNC_SCRAPE_READY_MS, Math.max(3_000, timeLeft())),
+    scrapeWaitMs: SYNC_SCRAPE_FALLBACK_MS,
+  });
+
+  const tasks = [];
+
+  if (about && !syncAbort) {
+    tasks.push(
+      (async () => {
+        const tabId = await ensureAboutScrapeTab();
+        if (tabId == null || syncAbort) {
+          return;
+        }
+        await scrapeUrlInTab(
+          tabId,
+          subnetAboutUrl(netuid),
+          netuid,
+          'about',
+          buildTimeouts()
+        );
+      })()
+    );
   }
 
-  const metagraphTabId = await ensureMetagraphScrapeTab();
-  if (metagraphTabId == null) {
+  if (metagraph && !syncAbort) {
+    tasks.push(
+      (async () => {
+        const tabId = await ensureMetagraphScrapeTab();
+        if (tabId == null || syncAbort) {
+          return;
+        }
+        await scrapeUrlInTab(
+          tabId,
+          subnetMetagraphUrl(netuid),
+          netuid,
+          'metagraph',
+          buildTimeouts()
+        );
+      })()
+    );
+  }
+
+  if (tasks.length === 0) {
     return;
   }
 
   try {
-    await scrapeUrlInTab(
-      metagraphTabId,
-      subnetMetagraphUrl(netuid),
-      netuid,
-      'metagraph'
-    );
+    await withTimeout(Promise.all(tasks), budgetMs, `sync subnet ${netuid}`);
   } catch {
-    // Ignore scrape failures; we'll retry later.
+    // Move on to the next subnet when this one exceeds the budget.
+  } finally {
+    scheduleExplorerRefresh();
   }
 }
 
@@ -440,11 +579,11 @@ async function runSyncSingle(netuid) {
 
   await applyBulkRegFees([id], settings, ttl);
   if (!syncAbort) {
-    await scrapeSubnetInHiddenTab(id, { metagraph: true });
+    await scrapeSubnetInHiddenTab(id, { about: true, metagraph: true });
   }
   scheduleScrapeWindowClose();
   await notifyExplorerRefresh();
-  await runSheetsPush({ interactive: false }).catch(() => {});
+  runSheetsPushAfterSync();
 
   await setSyncStatus({
     running: false,
@@ -491,8 +630,17 @@ async function runSyncAll(netuids) {
       startedAt: Date.now(),
     });
 
-    await scrapeSubnetInHiddenTab(netuid, { metagraph: true });
+    await scrapeSubnetInHiddenTab(netuid, { about: true, metagraph: true });
     completed = i + 1;
+
+    await setSyncStatus({
+      running: true,
+      total: unique.length,
+      done: completed,
+      currentNetuid: netuid,
+      startedAt: Date.now(),
+    });
+    scheduleExplorerRefresh();
   }
 
   await setSyncStatus({
@@ -506,7 +654,7 @@ async function runSyncAll(netuids) {
 
   scheduleScrapeWindowClose();
   await notifyExplorerRefresh();
-  await runSheetsPush({ interactive: false }).catch(() => {});
+  runSheetsPushAfterSync();
 }
 
 async function getCacheTtlMs() {
@@ -546,7 +694,7 @@ async function runSheetsPull({ interactive = true } = {}) {
     preferPublic: sheets.publicPull,
   });
   const merged = mergeCacheMaps(localMap, pulled.remoteMap);
-  await updateCacheEntries(merged, await getCacheTtlMs());
+  await replaceCacheMap(merged, await getCacheTtlMs());
   await notifyExplorerRefresh();
 
   return {
@@ -567,7 +715,7 @@ async function runSheetsPush({ interactive = true } = {}) {
   const localMap = await getCache();
   try {
     const pushed = await pushCacheToSheets(sheets.spreadsheetId, localMap, { interactive });
-    await updateCacheEntries(pushed.mergedMap, await getCacheTtlMs());
+    await replaceCacheMap(pushed.mergedMap, await getCacheTtlMs());
     await notifyExplorerRefresh();
 
     return {
@@ -594,7 +742,7 @@ async function runSheetsSync({ interactive = true } = {}) {
 
   const localMap = await getCache();
   const synced = await syncCacheWithSheets(sheets.spreadsheetId, localMap, { interactive });
-  await updateCacheEntries(synced.mergedMap, await getCacheTtlMs());
+  await replaceCacheMap(synced.mergedMap, await getCacheTtlMs());
   await notifyExplorerRefresh();
 
   return {
@@ -622,7 +770,7 @@ async function importCacheFromFile(payload, { replace = false } = {}) {
   const localMap = await getCache();
   const merged = replace ? remoteMap : mergeCacheMaps(localMap, remoteMap);
 
-  await setCache(merged, ttl);
+  await replaceCacheMap(merged, ttl);
   await notifyExplorerRefresh();
 
   return {
@@ -666,7 +814,7 @@ async function trackNextMissingSubnet() {
     }
 
     if (metagraph) {
-      await scrapeSubnetInHiddenTab(netuid, { metagraph: true });
+      await scrapeSubnetInHiddenTab(netuid, { about: true, metagraph: true });
       return;
     }
   }
@@ -720,12 +868,13 @@ async function refreshMetricsFor(netuids, { ttl, settings }) {
   fetched.forEach((metric, netuid) => {
     const patch = buildRegFeeCachePatch(metric, taoUsd);
     if (patch) {
-      updates[netuid] = patch;
+      updates[String(netuid)] = patch;
     }
   });
 
   if (Object.keys(updates).length > 0) {
     await updateCacheEntries(updates, ttl);
+    scheduleExplorerRefresh();
   }
 
   if (settings.useTaoApi && apiKey) {
@@ -736,8 +885,12 @@ async function refreshMetricsFor(netuids, { ttl, settings }) {
           const payload = await fetchSubnetFromTaoApp(netuid, apiKey);
           const normalized = normalizeTaoAppSubnet(payload, netuid);
           if (normalized) {
-            const patch = { [netuid]: normalized };
-            await updateCacheEntries(patch, ttl);
+            await updateCacheEntries(
+              {
+                [String(netuid)]: normalized,
+              },
+              ttl
+            );
           }
         } catch {
           // Ignore enrichment failures.
@@ -778,8 +931,11 @@ async function ensureMetrics(netuids = [], { force = false } = {}) {
 
   const shouldRefresh = isStale || missing.length > 0;
   if (shouldRefresh && !refreshPromise) {
-    // Fire-and-forget refresh; next request will pick up new cache.
+    // Fire-and-forget refresh; notify explorer when cache lands.
     refreshPromise = refreshMetricsFor(requested, { ttl, settings })
+      .then(() => {
+        scheduleExplorerRefresh();
+      })
       .catch(() => {})
       .finally(() => {
         refreshPromise = null;
@@ -809,10 +965,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return { ok: false };
         }
 
-        const cached = deserializeMetrics(await getCache());
-        const current = cached.get(message.netuid) || { netuid: message.netuid };
-        cached.set(message.netuid, { ...current, ...captured, source: 'tao.app' });
-        await updateCacheEntries(serializeMetrics(cached));
+        const settings = await getSettings();
+        const ttl = Math.max(1, settings.refreshMinutes) * 60 * 1000;
+        await updateCacheEntries(
+          {
+            [String(message.netuid)]: {
+              ...captured,
+              netuid: Number(message.netuid),
+              source: 'tao.app',
+            },
+          },
+          ttl
+        );
+        scheduleExplorerRefresh();
         return { ok: true };
       }
 
@@ -822,11 +987,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return { ok: false };
         }
 
-        const cached = deserializeMetrics(await getCache());
-        const current = cached.get(netuid) || { netuid };
-        cached.set(netuid, { ...current, ...patch, source: patch.source ?? current.source ?? 'dom' });
-        await updateCacheEntries(serializeMetrics(cached));
-        return { ok: true };
+        const settings = await getSettings();
+        const ttl = Math.max(1, settings.refreshMinutes) * 60 * 1000;
+        const key = String(netuid);
+
+        await updateCacheEntries(
+          {
+            [key]: {
+              ...patch,
+              netuid: Number(netuid),
+            },
+          },
+          ttl
+        );
+
+        const cache = await getCache();
+        const entry = cache[key] ?? null;
+        await notifyExplorerMetricsUpdate(Number(netuid), entry);
+        return { ok: true, entry };
       }
 
       case MESSAGE.START_BACKGROUND_TRACKING: {
@@ -903,6 +1081,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       case MESSAGE.GET_SYNC_STATUS: {
         const stored = await chrome.storage.local.get(SYNC_STATUS_KEY);
         return stored[SYNC_STATUS_KEY] ?? { running: false };
+      }
+
+      case MESSAGE.REQUEST_EXPLORER_REFRESH: {
+        notifyExplorerRefresh().catch(() => {});
+        return { ok: true };
       }
 
       case MESSAGE.SCRAPE_PAGE_READY: {
@@ -990,7 +1173,7 @@ async function seedCommunitySheetDefaults() {
   const stored = await chrome.storage.sync.get({
     sheetsSpreadsheetId: '',
     sheetsPublicPull: true,
-    sheetsPullOnLoad: true,
+    sheetsPullOnLoad: false,
     sheetsDefaultsSeeded: false,
   });
 
@@ -1000,7 +1183,6 @@ async function seedCommunitySheetDefaults() {
   }
   if (!stored.sheetsDefaultsSeeded) {
     updates.sheetsPublicPull = true;
-    updates.sheetsPullOnLoad = true;
     updates.sheetsDefaultsSeeded = true;
   }
 

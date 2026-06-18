@@ -22,34 +22,43 @@ function parseSpreadsheetId(input) {
 }
 
 function entryTimestamp(entry) {
+  if (typeof entryFreshness === 'function') {
+    return entryFreshness(entry);
+  }
+
   const value = Number(entry?.updatedAt ?? entry?.cachedAt ?? 0);
   return Number.isFinite(value) ? value : 0;
 }
 
 function mergeCacheMaps(localMap = {}, remoteMap = {}) {
-  const merged = { ...localMap };
+  const merged = normalizeCacheMap(localMap);
   const now = Date.now();
 
-  Object.entries(remoteMap).forEach(([key, remoteEntry]) => {
-    if (!remoteEntry || typeof remoteEntry !== 'object') {
-      return;
-    }
-
+  Object.entries(normalizeCacheMap(remoteMap)).forEach(([key, remoteEntry]) => {
     const localEntry = merged[key];
     const remoteTime = entryTimestamp(remoteEntry);
     const localTime = entryTimestamp(localEntry);
 
     if (!localEntry || remoteTime > localTime) {
-      merged[key] = { ...remoteEntry, updatedAt: remoteTime || now };
+      merged[key] = mergeCacheEntry(localEntry, {
+        ...remoteEntry,
+        updatedAt: remoteTime || now,
+      });
       return;
     }
 
     if (remoteTime === localTime) {
-      merged[key] = { ...remoteEntry, ...localEntry, updatedAt: localTime || now };
+      merged[key] = mergeCacheEntry(remoteEntry, {
+        ...localEntry,
+        updatedAt: localTime || now,
+      });
       return;
     }
 
-    merged[key] = { ...localEntry, updatedAt: localTime || now };
+    merged[key] = mergeCacheEntry(remoteEntry, {
+      ...localEntry,
+      updatedAt: localTime || now,
+    });
   });
 
   return merged;

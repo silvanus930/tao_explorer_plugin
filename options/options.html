@@ -468,6 +468,14 @@
             Removes the TradingView chart and trade panel on subnet pages.
           </p>
 
+          <label class="toggle-row">
+            <span>Subnet scrape debug</span>
+            <input id="metagraphScrapeDebug" type="checkbox" />
+          </label>
+          <p class="field-hint" style="margin: -6px 0 12px">
+            On subnet About or Metagraph tabs, show an insight modal after a successful scrape.
+          </p>
+
           <label class="field">
             <span class="field-label">TAO.app API key (optional)</span>
             <input
@@ -537,8 +545,11 @@
 
           <label class="toggle-row">
             <span>Download when explorer opens</span>
-            <input id="sheetsPullOnLoad" type="checkbox" checked />
+            <input id="sheetsPullOnLoad" type="checkbox" />
           </label>
+          <p class="field-hint" style="margin: -6px 0 12px">
+            When enabled, pulls the latest cache from the sheet each time you open the explorer.
+          </p>
 
           <div class="btn-group">
             <button type="button" id="pull-sheet-btn" class="btn btn-primary">Pull</button>

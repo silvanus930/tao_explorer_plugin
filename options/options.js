@@ -5,6 +5,7 @@ const sheetsStatus = document.getElementById('sheets-status');
 const refreshMinutes = document.getElementById('refreshMinutes');
 const useTaoApi = document.getElementById('useTaoApi');
 const hideSubnetTradingView = document.getElementById('hideSubnetTradingView');
+const metagraphScrapeDebug = document.getElementById('metagraphScrapeDebug');
 const taoApiKey = document.getElementById('taoApiKey');
 const sheetsEnabled = document.getElementById('sheetsEnabled');
 const sheetsSpreadsheetId = document.getElementById('sheetsSpreadsheetId');
@@ -250,10 +251,11 @@ async function loadSettings() {
     refreshMinutes: 10,
     useTaoApi: false,
     hideSubnetTradingView: false,
+    metagraphScrapeDebug: false,
     sheetsEnabled: false,
     sheetsSpreadsheetId: '',
     sheetsAutoSync: true,
-    sheetsPullOnLoad: true,
+    sheetsPullOnLoad: false,
     sheetsPublicPull: true,
     sheetsShowOwnControls: false,
   });
@@ -261,11 +263,12 @@ async function loadSettings() {
   refreshMinutes.value = stored.refreshMinutes;
   useTaoApi.checked = stored.useTaoApi;
   hideSubnetTradingView.checked = stored.hideSubnetTradingView === true;
+  metagraphScrapeDebug.checked = stored.metagraphScrapeDebug === true;
   taoApiKey.value = stored.taoApiKey;
   sheetsEnabled.checked = stored.sheetsEnabled;
   sheetsSpreadsheetId.value = stored.sheetsSpreadsheetId || getBuiltInSheetUrl();
   sheetsAutoSync.checked = stored.sheetsAutoSync !== false;
-  sheetsPullOnLoad.checked = stored.sheetsPullOnLoad !== false;
+  sheetsPullOnLoad.checked = stored.sheetsPullOnLoad === true;
   sheetsPublicPull.checked = stored.sheetsPublicPull !== false;
 
   const showOwnControls = stored.sheetsShowOwnControls === true || stored.sheetsEnabled === true;
@@ -304,6 +307,12 @@ hideSubnetTradingView?.addEventListener('change', async () => {
   });
 });
 
+metagraphScrapeDebug?.addEventListener('change', async () => {
+  await chrome.storage.sync.set({
+    metagraphScrapeDebug: metagraphScrapeDebug.checked === true,
+  });
+});
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
 
@@ -311,6 +320,7 @@ form.addEventListener('submit', async (event) => {
     refreshMinutes: Math.max(1, Math.min(120, Number(refreshMinutes.value) || 10)),
     useTaoApi: useTaoApi.checked,
     hideSubnetTradingView: hideSubnetTradingView.checked === true,
+    metagraphScrapeDebug: metagraphScrapeDebug.checked === true,
     taoApiKey: taoApiKey.value.trim(),
   };
 
