@@ -4,6 +4,7 @@ const status = document.getElementById('status');
 const sheetsStatus = document.getElementById('sheets-status');
 const refreshMinutes = document.getElementById('refreshMinutes');
 const useTaoApi = document.getElementById('useTaoApi');
+const hideSubnetTradingView = document.getElementById('hideSubnetTradingView');
 const taoApiKey = document.getElementById('taoApiKey');
 const sheetsEnabled = document.getElementById('sheetsEnabled');
 const sheetsSpreadsheetId = document.getElementById('sheetsSpreadsheetId');
@@ -248,6 +249,7 @@ async function loadSettings() {
     taoApiKey: '',
     refreshMinutes: 10,
     useTaoApi: false,
+    hideSubnetTradingView: false,
     sheetsEnabled: false,
     sheetsSpreadsheetId: '',
     sheetsAutoSync: true,
@@ -258,6 +260,7 @@ async function loadSettings() {
 
   refreshMinutes.value = stored.refreshMinutes;
   useTaoApi.checked = stored.useTaoApi;
+  hideSubnetTradingView.checked = stored.hideSubnetTradingView === true;
   taoApiKey.value = stored.taoApiKey;
   sheetsEnabled.checked = stored.sheetsEnabled;
   sheetsSpreadsheetId.value = stored.sheetsSpreadsheetId || getBuiltInSheetUrl();
@@ -295,12 +298,19 @@ async function sendSheetsMessage(type, extra = {}) {
   return chrome.runtime.sendMessage({ type, ...extra });
 }
 
+hideSubnetTradingView?.addEventListener('change', async () => {
+  await chrome.storage.sync.set({
+    hideSubnetTradingView: hideSubnetTradingView.checked === true,
+  });
+});
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
 
   const settings = {
     refreshMinutes: Math.max(1, Math.min(120, Number(refreshMinutes.value) || 10)),
     useTaoApi: useTaoApi.checked,
+    hideSubnetTradingView: hideSubnetTradingView.checked === true,
     taoApiKey: taoApiKey.value.trim(),
   };
 

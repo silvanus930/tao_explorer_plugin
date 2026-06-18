@@ -218,35 +218,68 @@ html[data-tao-analytics-miner-emissions='on'] .tao-analytics-header.tao-analytic
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
-  margin-right: 0.625rem;
+  margin: 0;
+}
+
+.tao-analytics-metagraph-controls-bar {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0 0.75rem;
+  gap: 0.5rem;
+}
+
+.tao-analytics-metagraph-controls-bar > .flex.flex-wrap {
+  flex-wrap: nowrap;
+  gap: 0.5rem;
+}
+
+@media (max-width: 767px) {
+  .tao-analytics-metagraph-controls-bar {
+    order: 3;
+    width: 100%;
+    margin: 0.5rem 0 0;
+  }
+
+  .tao-analytics-metagraph-controls-bar > .flex.flex-wrap {
+    flex-wrap: wrap;
+  }
 }
 
 .tao-analytics-subnet-nav {
   display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
+  align-items: stretch;
+  gap: 0;
   flex-shrink: 0;
-  padding: 0.125rem 0.25rem;
-  --tao-subnet-nav-radius: 0.5rem;
-  --tao-subnet-nav-border: rgba(113, 113, 122, 0.55);
-  --tao-subnet-nav-bg: rgba(24, 24, 27, 0.75);
-  --tao-subnet-nav-bg-hover: rgba(24, 24, 27, 0.9);
-  --tao-subnet-nav-bg-active: rgba(9, 9, 11, 0.95);
-  --tao-subnet-nav-focus-ring: 0 0 0 2px rgba(113, 113, 122, 0.3);
+  overflow: hidden;
+  border: 1px solid var(--tao-subnet-nav-border);
+  border-radius: var(--tao-subnet-nav-radius);
+  background: var(--tao-subnet-nav-bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --tao-subnet-nav-radius: 0.375rem;
+  --tao-subnet-nav-border: rgba(63, 63, 70, 0.9);
+  --tao-subnet-nav-bg: rgba(24, 24, 27, 0.85);
+  --tao-subnet-nav-bg-hover: rgba(39, 39, 42, 0.95);
+  --tao-subnet-nav-bg-active: rgba(9, 9, 11, 0.98);
+  --tao-subnet-nav-focus-ring: 0 0 0 2px rgba(113, 113, 122, 0.35);
+}
+
+.tao-analytics-subnet-nav > *:not(:first-child) {
+  border-left: 1px solid var(--tao-subnet-nav-border);
 }
 
 .tao-analytics-subnet-nav-btn,
 .tao-analytics-subnet-nav-input {
   height: 2rem;
-  border: 1px solid var(--tao-subnet-nav-border);
-  border-radius: var(--tao-subnet-nav-radius);
-  background: var(--tao-subnet-nav-bg);
+  border: none;
+  border-radius: 0;
+  background: transparent;
   color: #fafafa;
   font-variant-numeric: tabular-nums;
   line-height: 1;
   box-sizing: border-box;
   transition:
-    border-color 0.15s ease,
     background-color 0.15s ease,
     color 0.15s ease,
     box-shadow 0.15s ease;
@@ -266,21 +299,20 @@ html[data-tao-analytics-miner-emissions='on'] .tao-analytics-header.tao-analytic
 
 .tao-analytics-subnet-nav-btn:hover:not(:disabled),
 .tao-analytics-subnet-nav-input:hover {
-  border-color: rgba(161, 161, 170, 0.6);
   background: var(--tao-subnet-nav-bg-hover);
 }
 
 .tao-analytics-subnet-nav-btn:active:not(:disabled) {
   background: var(--tao-subnet-nav-bg-active);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
 }
 
 .tao-analytics-subnet-nav-btn:focus-visible,
 .tao-analytics-subnet-nav-input:focus {
   outline: none;
-  border-color: rgba(212, 212, 216, 0.75);
   background: var(--tao-subnet-nav-bg-active);
-  box-shadow: var(--tao-subnet-nav-focus-ring);
+  box-shadow: inset var(--tao-subnet-nav-focus-ring);
+  z-index: 1;
+  position: relative;
 }
 
 .tao-analytics-subnet-nav-btn:disabled {

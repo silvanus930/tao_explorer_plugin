@@ -31,6 +31,7 @@ const COLUMN_WIDTH = {
 
 const COLUMN_WIDTH_MINERS_EXPANDED = 200;
 const MINERS_EMISSIONS_PREF_KEY = 'showMinerEmissions';
+const HIDE_SUBNET_TRADING_VIEW_KEY = 'hideSubnetTradingView';
 
 const MINER_COUNT_DISPLAY_CAP = 40;
 const SUBNET_NETUID_MAX = 128;
@@ -57,6 +58,10 @@ let columnDragState = null;
 let columnOrderObserver = null;
 let observedColumnOrderRow = null;
 let showMinerEmissions = false;
+let hideSubnetTradingView = false;
+let tradingViewHideObserver = null;
+let tradingViewHideUrlWatch = null;
+let tradingViewHideTimer = null;
 
 const ANALYTICS_COLUMN_CLASSES = [COLUMN.BURN, COLUMN.FEE, COLUMN.MINERS];
 
@@ -198,6 +203,17 @@ async function setLocalStorage(data) {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function getSyncStorage(keys) {
+  if (!isExtensionContextValid()) {
+    return {};
+  }
+  try {
+    return await chrome.storage.sync.get(keys);
+  } catch {
+    return {};
   }
 }
 
@@ -1643,6 +1659,225 @@ function findSubnetNavMountPoint() {
   return null;
 }
 
+function findSubnetHeaderMountPoint() {
+  const h2 = [...document.querySelectorAll('h2')].find((el) =>
+    /^Subnet\s+\d/i.test(normalizeText(el.textContent)),
+  );
+  if (!h2) {
+    return null;
+  }
+
+  const leftCluster = h2.closest('.flex.items-center.gap-4');
+  if (!(leftCluster instanceof HTMLElement)) {
+    return null;
+  }
+
+  return { header: leftCluster, before: null };
+}
+
+function findSubnetToolbarRow() {
+  const snapshotLabel = [...document.querySelectorAll('label')].find(
+    (el) => normalizeText(el.textContent) === 'Snapshot',
+  );
+  const form = snapshotLabel?.closest('form');
+  if (!(form instanceof HTMLElement)) {
+    return null;
+  }
+
+  const row = form.parentElement;
+  if (!(row instanceof HTMLElement)) {
+    return null;
+  }
+
+  const tabHost =
+    row.querySelector('[role="tablist"]')?.parentElement ||
+    row.querySelector('[data-tao-subnet-toolbar-host]');
+  if (!(tabHost instanceof HTMLElement)) {
+    return null;
+  }
+
+  return { row, form, tabHost };
+}
+
+function isMetagraphTabActive() {
+  const activeTab = document.querySelector('[role="tablist"] [role="tab"][data-state="active"]');
+  if (activeTab instanceof HTMLElement) {
+    const id = activeTab.id || '';
+    const label = normalizeText(activeTab.textContent);
+    if (/metagraph/i.test(id) || label === 'Metagraph') {
+      return true;
+    }
+    return false;
+  }
+
+  return getActiveSubnetTab() === 'metagraph';
+}
+
+function findActiveMetagraphTabTrigger() {
+  return (
+    document.querySelector('[role="tablist"] [role="tab"][id*="metagraph"][data-state="active"]') ||
+    [...document.querySelectorAll('[role="tablist"] [role="tab"]')].find(
+      (el) =>
+        el.getAttribute('data-state') === 'active' &&
+        normalizeText(el.textContent) === 'Metagraph',
+    ) ||
+    null
+  );
+}
+
+function findMetagraphTabPanel() {
+  const trigger = findActiveMetagraphTabTrigger();
+  if (trigger) {
+    const panelId = trigger.getAttribute('aria-controls');
+    if (panelId) {
+      const panel = document.getElementById(panelId);
+      if (panel instanceof HTMLElement) {
+        return panel;
+      }
+    }
+  }
+
+  if (!isMetagraphTabActive()) {
+    return null;
+  }
+
+  for (const panel of document.querySelectorAll('[role="tabpanel"]')) {
+    const searchInput = panel.querySelector('input[placeholder*="Search"]');
+    const table = panel.querySelector('table');
+    if (!(searchInput instanceof HTMLElement) || !table) {
+      continue;
+    }
+
+    const headers = [...table.querySelectorAll('thead th')].map((cell) =>
+      normalizeText(cell.textContent),
+    );
+    if (headers.includes('UID')) {
+      return panel;
+    }
+  }
+
+  return null;
+}
+
+function findMetagraphControlsBarInPanel() {
+  if (!isMetagraphTabActive()) {
+    return null;
+  }
+
+  const panel = findMetagraphTabPanel();
+  if (!(panel instanceof HTMLElement)) {
+    return null;
+  }
+
+  const searchInput = panel.querySelector('input[placeholder*="Search"]');
+  if (!(searchInput instanceof HTMLElement)) {
+    return null;
+  }
+
+  const bar =
+    searchInput.closest('.mb-4.flex') ||
+    searchInput.closest('.flex.flex-wrap')?.parentElement;
+
+  if (!(bar instanceof HTMLElement) || !panel.contains(bar)) {
+    return null;
+  }
+
+  return bar;
+}
+
+function findMovedMetagraphControlsBar() {
+  const toolbar = findSubnetToolbarRow();
+  const bar = toolbar?.row?.querySelector('.tao-analytics-metagraph-controls-bar');
+  return bar instanceof HTMLElement ? bar : null;
+}
+
+const metagraphControlsPlacement = {
+  bar: null,
+  originParent: null,
+  originNext: null,
+};
+
+function clearMetagraphControlsPlacementState() {
+  metagraphControlsPlacement.bar = null;
+  metagraphControlsPlacement.originParent = null;
+  metagraphControlsPlacement.originNext = null;
+}
+
+function detachMetagraphControlsFromToolbar() {
+  const bar = findMovedMetagraphControlsBar() || metagraphControlsPlacement.bar;
+  if (!(bar instanceof HTMLElement) || !bar.isConnected) {
+    clearMetagraphControlsPlacementState();
+    return;
+  }
+
+  bar.classList.remove('tao-analytics-metagraph-controls-bar');
+  delete bar.dataset.taoMetagraphControlsMoved;
+
+  const { originParent, originNext } = metagraphControlsPlacement;
+  if (originParent?.isConnected) {
+    originParent.insertBefore(bar, originNext);
+  } else {
+    bar.remove();
+  }
+
+  clearMetagraphControlsPlacementState();
+}
+
+function isMetagraphControlsPlaced(toolbar, bar) {
+  return (
+    toolbar?.row &&
+    bar &&
+    bar.parentElement === toolbar.row &&
+    bar.previousElementSibling === toolbar.form
+  );
+}
+
+function ensureMetagraphControlsPlacement() {
+  if (!isSubnetPage()) {
+    return;
+  }
+
+  if (!isMetagraphTabActive()) {
+    detachMetagraphControlsFromToolbar();
+    return;
+  }
+
+  const toolbar = findSubnetToolbarRow();
+  if (!toolbar) {
+    return;
+  }
+
+  const movedBar = findMovedMetagraphControlsBar();
+  const freshBar = findMetagraphControlsBarInPanel();
+
+  if (movedBar && freshBar && movedBar !== freshBar) {
+    movedBar.remove();
+    clearMetagraphControlsPlacementState();
+  } else if (movedBar && isMetagraphControlsPlaced(toolbar, movedBar)) {
+    return;
+  } else if (movedBar && !freshBar) {
+    return;
+  } else if (movedBar && !isMetagraphControlsPlaced(toolbar, movedBar)) {
+    movedBar.remove();
+    clearMetagraphControlsPlacementState();
+  }
+
+  const bar = findMetagraphControlsBarInPanel();
+  if (!bar) {
+    return;
+  }
+
+  if (metagraphControlsPlacement.bar !== bar) {
+    metagraphControlsPlacement.bar = bar;
+    metagraphControlsPlacement.originParent = bar.parentElement;
+    metagraphControlsPlacement.originNext = bar.nextSibling;
+  }
+
+  bar.classList.add('tao-analytics-metagraph-controls-bar');
+  bar.dataset.taoMetagraphControlsMoved = '1';
+  toolbar.row.insertBefore(bar, toolbar.tabHost);
+}
+
 function normalizeSubnetNavControls(nav) {
   if (!nav) {
     return;
@@ -1666,53 +1901,23 @@ function normalizeSubnetNavControls(nav) {
 }
 
 function applySubnetNavBarStyles(section) {
-  const tabBar = findSubnetNavMountPoint()?.tabBar;
-  if (!(section instanceof HTMLElement) || !(tabBar instanceof HTMLElement)) {
+  if (!(section instanceof HTMLElement)) {
     return false;
   }
 
-  const styles = getComputedStyle(tabBar);
   section.style.display = 'inline-flex';
-  section.style.alignItems = styles.alignItems || 'center';
-  section.style.gap = styles.gap || styles.columnGap || '0.25rem';
-  section.style.padding = styles.padding;
-  section.style.borderRadius = styles.borderRadius;
-  section.style.background = styles.background;
-  section.style.backgroundColor = styles.backgroundColor;
-  section.style.boxShadow = styles.boxShadow;
-  section.style.border = styles.border;
+  section.style.alignItems = 'center';
   section.style.flexShrink = '0';
-  const host = tabBar.parentElement;
-  section.style.marginRight = host?.dataset.taoSubnetToolbarHost === '1' ? '0' : '0.625rem';
+  section.style.padding = '';
+  section.style.gap = '';
+  section.style.borderRadius = '';
+  section.style.background = '';
+  section.style.backgroundColor = '';
+  section.style.boxShadow = '';
+  section.style.border = '';
+  section.style.marginRight = '';
+  section.style.marginLeft = '';
   return true;
-}
-
-function syncSubnetToolbarHost(tabBar) {
-  const host = tabBar?.parentElement;
-  if (!(host instanceof HTMLElement) || host.dataset.taoSubnetToolbarHost === '1') {
-    return;
-  }
-
-  host.dataset.taoSubnetToolbarHost = '1';
-  const display = getComputedStyle(host).display;
-  if (display === 'block' || display === 'flex' || display === 'inline-flex') {
-    host.style.display = 'flex';
-    host.style.alignItems = 'center';
-    host.style.flexWrap = 'wrap';
-    host.style.gap = '0.625rem';
-  }
-}
-
-function unwrapGoCardFromTabBar() {
-  const section = document.querySelector('.tao-analytics-subnet-nav-section');
-  const mount = findSubnetNavMountPoint();
-  if (!(section instanceof HTMLElement) || !mount?.tabBar) {
-    return;
-  }
-
-  if (mount.tabBar.contains(section) && mount.tabBar !== section) {
-    mount.tabBar.parentElement?.insertBefore(section, mount.tabBar);
-  }
 }
 
 function unwrapLegacySubnetNavLayout() {
@@ -1738,16 +1943,19 @@ function unwrapLegacySubnetNavLayout() {
 }
 
 function isSubnetNavigatorPlaced(mount, section) {
-  if (!section || !mount?.tabBar) {
+  if (!section || !mount?.header) {
     return false;
   }
 
-  const host = mount.tabBar.parentElement;
-  if (!host || section.parentElement !== host) {
+  if (section.parentElement !== mount.header) {
     return false;
   }
 
-  return section.nextSibling === mount.tabBar;
+  if (mount.before) {
+    return section.nextSibling === mount.before;
+  }
+
+  return section === mount.header.lastElementChild;
 }
 
 function bindSubnetNavigator(nav) {
@@ -1864,6 +2072,8 @@ function wrapSubnetNavigatorSection(nav) {
 
 let subnetNavObserver = null;
 let subnetNavUrlWatch = null;
+let subnetNavTabClickHandler = null;
+let lastMetagraphTabActive = null;
 let subnetNavIsMounting = false;
 
 function ensureSubnetNavigator() {
@@ -1871,8 +2081,9 @@ function ensureSubnetNavigator() {
     return;
   }
 
-  const mount = findSubnetNavMountPoint();
+  const mount = findSubnetHeaderMountPoint();
   if (!mount) {
+    ensureMetagraphControlsPlacement();
     return;
   }
 
@@ -1881,7 +2092,6 @@ function ensureSubnetNavigator() {
 
   try {
     unwrapLegacySubnetNavLayout();
-    unwrapGoCardFromTabBar();
 
     let section = document.querySelector('.tao-analytics-subnet-nav-section');
     let nav = section?.querySelector('.tao-analytics-subnet-nav') ?? null;
@@ -1898,11 +2108,16 @@ function ensureSubnetNavigator() {
     }
 
     if (section && !isSubnetNavigatorPlaced(mount, section)) {
-      mount.tabBar.parentElement?.insertBefore(section, mount.tabBar);
+      if (mount.before) {
+        mount.header.insertBefore(section, mount.before);
+      } else {
+        mount.header.appendChild(section);
+      }
     }
 
-    syncSubnetToolbarHost(mount.tabBar);
     section?.querySelector('.tao-analytics-subnet-nav-gap')?.remove();
+
+    ensureMetagraphControlsPlacement();
 
     if (section) {
       applySubnetNavBarStyles(section);
@@ -1932,6 +2147,142 @@ function teardownSubnetNavigator() {
     clearInterval(subnetNavUrlWatch);
     subnetNavUrlWatch = null;
   }
+  detachMetagraphControlsFromToolbar();
+  if (subnetNavTabClickHandler) {
+    document.removeEventListener('click', subnetNavTabClickHandler, true);
+    subnetNavTabClickHandler = null;
+  }
+  lastMetagraphTabActive = null;
+}
+
+function isSubnetTradingViewRoot(node) {
+  if (!(node instanceof HTMLElement)) {
+    return false;
+  }
+
+  const className = node.className || '';
+  if (!className.includes('flex-col') || !className.includes('flex-row')) {
+    return false;
+  }
+
+  const hasChart = node.querySelector(
+    'iframe[id^="tradingview_"], iframe[title="Financial Chart"]',
+  );
+  const hasTradePanel = node.querySelector('[role="tablist"]');
+
+  return Boolean(hasChart && hasTradePanel);
+}
+
+function findSubnetTradingViewRoot() {
+  for (const iframe of document.querySelectorAll(
+    'iframe[id^="tradingview_"], iframe[title="Financial Chart"]',
+  )) {
+    let node = iframe.parentElement;
+
+    for (let depth = 0; depth < 14 && node instanceof HTMLElement; depth += 1) {
+      if (isSubnetTradingViewRoot(node)) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+  }
+
+  return null;
+}
+
+function removeSubnetTradingView() {
+  if (!hideSubnetTradingView || !isSubnetPage()) {
+    return;
+  }
+
+  const root = findSubnetTradingViewRoot();
+  if (root) {
+    root.remove();
+  }
+}
+
+function scheduleSubnetTradingViewHide() {
+  if (!hideSubnetTradingView || !isSubnetPage()) {
+    return;
+  }
+
+  if (tradingViewHideTimer) {
+    clearTimeout(tradingViewHideTimer);
+  }
+
+  tradingViewHideTimer = setTimeout(() => {
+    tradingViewHideTimer = null;
+    removeSubnetTradingView();
+  }, 80);
+}
+
+async function loadHideSubnetTradingViewPreference() {
+  const stored = await getSyncStorage({ [HIDE_SUBNET_TRADING_VIEW_KEY]: false });
+  hideSubnetTradingView = stored?.[HIDE_SUBNET_TRADING_VIEW_KEY] === true;
+  document.documentElement.dataset.taoAnalyticsHideTradingView = hideSubnetTradingView
+    ? 'on'
+    : 'off';
+}
+
+function teardownSubnetTradingViewHider() {
+  if (tradingViewHideObserver) {
+    tradingViewHideObserver.disconnect();
+    tradingViewHideObserver = null;
+  }
+  if (tradingViewHideUrlWatch) {
+    clearInterval(tradingViewHideUrlWatch);
+    tradingViewHideUrlWatch = null;
+  }
+  if (tradingViewHideTimer) {
+    clearTimeout(tradingViewHideTimer);
+    tradingViewHideTimer = null;
+  }
+}
+
+function initSubnetTradingViewHider() {
+  const schedule = () => {
+    scheduleSubnetTradingViewHide();
+  };
+
+  schedule();
+
+  if (!tradingViewHideObserver) {
+    tradingViewHideObserver = new MutationObserver(schedule);
+    tradingViewHideObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  if (!tradingViewHideUrlWatch) {
+    let lastHref = location.href;
+    tradingViewHideUrlWatch = setInterval(() => {
+      if (location.href !== lastHref) {
+        lastHref = location.href;
+        schedule();
+      }
+    }, 400);
+  }
+
+  if (!initSubnetTradingViewHider.storageListenerBound) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'sync' || !changes?.[HIDE_SUBNET_TRADING_VIEW_KEY]) {
+        return;
+      }
+
+      hideSubnetTradingView = changes[HIDE_SUBNET_TRADING_VIEW_KEY].newValue === true;
+      document.documentElement.dataset.taoAnalyticsHideTradingView = hideSubnetTradingView
+        ? 'on'
+        : 'off';
+      schedule();
+    });
+    initSubnetTradingViewHider.storageListenerBound = true;
+  }
+}
+
+function scheduleMetagraphControlsPlacement() {
+  ensureMetagraphControlsPlacement();
+  setTimeout(() => ensureMetagraphControlsPlacement(), 200);
 }
 
 function initSubnetNavigator() {
@@ -1948,16 +2299,7 @@ function initSubnetNavigator() {
     }
     mountTimer = setTimeout(() => {
       mountTimer = null;
-      const nav = document.querySelector('.tao-analytics-subnet-nav');
-      const section = document.querySelector('.tao-analytics-subnet-nav-section');
-      if (nav) {
-        if (section) {
-          applySubnetNavBarStyles(section);
-        }
-        normalizeSubnetNavControls(nav);
-      } else {
-        ensureSubnetNavigator();
-      }
+      ensureSubnetNavigator();
     }, 120);
   };
 
@@ -1966,11 +2308,33 @@ function initSubnetNavigator() {
   subnetNavObserver = new MutationObserver(scheduleMount);
   subnetNavObserver.observe(document.documentElement, { childList: true, subtree: true });
 
+  if (!subnetNavTabClickHandler) {
+    subnetNavTabClickHandler = (event) => {
+      if (!isSubnetPage()) {
+        return;
+      }
+      const tab = event.target.closest?.('[role="tab"]');
+      if (tab?.closest('[role="tablist"]')) {
+        scheduleMetagraphControlsPlacement();
+      }
+    };
+    document.addEventListener('click', subnetNavTabClickHandler, true);
+  }
+
   let lastHref = location.href;
+  lastMetagraphTabActive = isMetagraphTabActive();
   subnetNavUrlWatch = setInterval(() => {
     if (location.href !== lastHref) {
       lastHref = location.href;
+      lastMetagraphTabActive = isMetagraphTabActive();
       ensureSubnetNavigator();
+      return;
+    }
+
+    const metagraphActive = isMetagraphTabActive();
+    if (metagraphActive !== lastMetagraphTabActive) {
+      lastMetagraphTabActive = metagraphActive;
+      scheduleMetagraphControlsPlacement();
     }
   }, 400);
 
@@ -3217,6 +3581,9 @@ async function init() {
 
   console.info('[TAO Subnet Analytics] Active on', location.href);
   observeDom();
+
+  await loadHideSubnetTradingViewPreference();
+  initSubnetTradingViewHider();
 
   if (isSubnetPage()) {
     initSubnetPageScrape();
