@@ -37,6 +37,7 @@ const METagraph_SCRAPE_DEBUG_KEY = 'metagraphScrapeDebug';
 
 const MINER_COUNT_DISPLAY_CAP = 40;
 const SUBNET_NETUID_MAX = 128;
+const METAGRAPH_TABLE_SORT_SETTLE_MS = 350;
 
 const STORAGE_CACHE_KEY = 'subnetMetricsCache';
 const SYNC_STATUS_KEY = 'subnetSyncStatus';
@@ -64,8 +65,12 @@ let showMinerEmissions = false;
 let hideSubnetTradingView = false;
 let metagraphScrapeDebug = false;
 let metagraphDebugModalHost = null;
+let metagraphDebugModalTimer = null;
 let lastMetagraphDebugSignature = null;
 let lastAboutDebugSignature = null;
+let metagraphTableAutomationDepth = 0;
+let metagraphIncentiveSortLockedHref = null;
+let metagraphIncentiveSortInProgress = false;
 let tradingViewHideObserver = null;
 let tradingViewHideUrlWatch = null;
 let tradingViewHideTimer = null;
@@ -322,7 +327,7 @@ function parseNetuid(text) {
 
 function parseMinerUid(text) {
   const normalized = normalizeText(text);
-  const match = normalized.match(/^(\d+)$/);
+  const match = normalized.match(/^#?(\d{1,5})$/);
   if (!match) {
     return null;
   }
@@ -330,6 +335,30 @@ function parseMinerUid(text) {
   const uid = Number(match[1]);
   return Number.isInteger(uid) && uid >= 0 && uid <= 65535 ? uid : null;
 }
+
+function parseMinerUidFromCell(cell) {
+  if (!(cell instanceof Element)) {
+    return parseMinerUid(String(cell ?? ''));
+  }
+
+  const sources = [
+    cell.textContent,
+    cell.getAttribute('data-uid'),
+    cell.getAttribute('title'),
+    cell.querySelector('a, span, .font-mono')?.textContent,
+  ];
+
+  for (const source of sources) {
+    const uid = parseMinerUid(source);
+    if (uid != null) {
+      return uid;
+    }
+  }
+
+  return null;
+}
+
+const MINER_INCENTIVE_EPSILON = 1e-6;
 
 function formatTaoDisplay(value) {
   if (value == null || !Number.isFinite(value)) {
@@ -1098,6 +1127,69 @@ function isOrangeBurnElement(el) {
   return false;
 }
 
+function beginMetagraphTableAutomation() {
+  metagraphTableAutomationDepth += 1;
+}
+
+function endMetagraphTableAutomation() {
+  metagraphTableAutomationDepth = Math.max(0, metagraphTableAutomationDepth - 1);
+}
+
+function isMetagraphTableAutomationActive() {
+  return metagraphTableAutomationDepth > 0;
+}
+
+function markMetagraphIncentiveSortLocked() {
+  metagraphIncentiveSortLockedHref = location.href;
+}
+
+function isMetagraphIncentiveSortLocked() {
+  return metagraphIncentiveSortLockedHref === location.href;
+}
+
+function resetMetagraphIncentiveSortLock() {
+  metagraphIncentiveSortLockedHref = null;
+  metagraphIncentiveSortInProgress = false;
+}
+
+async function waitForMetagraphSortSettle(tableInfo, timeoutMs = 2200) {
+  const started = Date.now();
+
+  while (Date.now() - started < timeoutMs) {
+    await delay(160);
+    tableInfo = findMetagraphTable() || tableInfo;
+    if (getMetagraphIncentiveSortVisualState(tableInfo) === 'down') {
+      return tableInfo;
+    }
+  }
+
+  return findMetagraphTable() || tableInfo;
+}
+
+async function waitForMetagraphTableRows(timeoutMs = 3000) {
+  const started = Date.now();
+
+  while (Date.now() - started < timeoutMs) {
+    const tableInfo = findMetagraphTable();
+    if (tableInfo?.table.querySelector('tbody tr')) {
+      return tableInfo;
+    }
+    await delay(120);
+  }
+
+  return findMetagraphTable();
+}
+
+async function waitForMetagraphTableReady(timeoutMs = 3500) {
+  const tableInfo = await waitForMetagraphTableRows(timeoutMs);
+  if (!tableInfo?.table.querySelector('tbody tr')) {
+    return tableInfo;
+  }
+
+  await delay(METAGRAPH_TABLE_SORT_SETTLE_MS);
+  return findMetagraphTable() || tableInfo;
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1109,7 +1201,7 @@ function isMetagraphScrapePageReady() {
 
   const tableInfo = findMetagraphTable();
   if (tableInfo) {
-    return isMetagraphIncentiveSortedDesc(tableInfo);
+    return isMetagraphIncentiveSortArrowDown(tableInfo);
   }
 
   return Boolean(document.querySelector('[aria-label="Owner incentive"]'));
@@ -1181,7 +1273,7 @@ function collectMetagraphTableSampleRows(limit = 8) {
 
     rows.push({
       uid: normalizeText(uidCell?.textContent ?? ''),
-      incentive: parseIncentiveCellValue(incentiveCell?.textContent ?? ''),
+      incentive: parseIncentiveFromCell(incentiveCell),
       incentiveText: normalizeText(incentiveCell?.textContent ?? ''),
       emission: normalizeText(emissionCell?.textContent ?? ''),
       isOwner: isMetagraphOwnerMinerRow(row, tableInfo),
@@ -1257,6 +1349,12 @@ function buildMetagraphScrapeDebugSnapshot(netuid, scrapeDetails = {}) {
   const cacheEntry = scrapeDetails.cacheEntry ?? metrics.get(Number(netuid)) ?? null;
   const overallCacheStatus =
     scrapeDetails.overallCacheStatus ?? deriveOverallCacheStatus({ ...scrapeDetails, cacheEntry });
+  const sortInsight =
+    scrapeDetails.incentiveSortInsight ??
+    scrapeDetails.diagnostics?.incentiveSortInsight ??
+    (tableInfo ? buildMetagraphIncentiveSortInsight(tableInfo) : null);
+  const incentiveSortState =
+    sortInsight?.visualState ?? scrapeDetails.diagnostics?.incentiveSortState ?? 'unknown';
 
   return {
     netuid: Number(netuid),
@@ -1265,7 +1363,12 @@ function buildMetagraphScrapeDebugSnapshot(netuid, scrapeDetails = {}) {
     scrapedAt: new Date().toISOString(),
     pageReady: isMetagraphScrapePageReady(),
     tableFound: Boolean(tableInfo),
-    incentiveSortedDesc: tableInfo ? isMetagraphIncentiveSortedDesc(tableInfo) : false,
+    incentiveSortedDesc: incentiveSortState === 'down',
+    incentiveSortState,
+    incentiveSortInsight: sortInsight,
+    incentiveSortReady: cacheEntry?.incentiveSortReady === true || sortInsight?.sortReady === true,
+    sortAction: scrapeDetails.sortAction ?? scrapeDetails.diagnostics?.sortAction ?? null,
+    sortSkipped: scrapeDetails.sortSkipped ?? scrapeDetails.diagnostics?.sortSkipped ?? null,
     ownerIncentive: scrapeDetails.ownerIncentive ?? collectOwnerIncentiveFromDom(),
     ownerCacheStatus: scrapeDetails.ownerCacheStatus ?? 'unknown',
     minerCount: scrapeDetails.minerCount ?? null,
@@ -1296,9 +1399,51 @@ function formatDebugValue(value) {
 }
 
 function hideMetagraphScrapeDebugModal() {
-  metagraphDebugModalHost?.remove();
-  metagraphDebugModalHost = null;
-  document.documentElement.classList.remove('tao-analytics-debug-modal-open');
+  if (!metagraphDebugModalHost) {
+    document.documentElement.classList.remove('tao-analytics-debug-modal-open');
+    return;
+  }
+
+  beginMetagraphTableAutomation();
+  try {
+    metagraphDebugModalHost.remove();
+    metagraphDebugModalHost = null;
+    document.documentElement.classList.remove('tao-analytics-debug-modal-open');
+  } finally {
+    endMetagraphTableAutomation();
+  }
+}
+
+function isExtensionUiNode(node) {
+  if (!(node instanceof Element)) {
+    return false;
+  }
+
+  return (
+    node.classList.contains('tao-analytics-debug-modal-host') ||
+    Boolean(node.closest('.tao-analytics-debug-modal-host'))
+  );
+}
+
+function isExtensionUiMutation(mutations) {
+  for (const mutation of mutations) {
+    for (const node of mutation.addedNodes) {
+      if (isExtensionUiNode(node)) {
+        return true;
+      }
+      if (node instanceof Element && node.querySelector?.('.tao-analytics-debug-modal-host')) {
+        return true;
+      }
+    }
+
+    for (const node of mutation.removedNodes) {
+      if (isExtensionUiNode(node)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function showMetagraphScrapeDebugModal(snapshot) {
@@ -1306,9 +1451,11 @@ function showMetagraphScrapeDebugModal(snapshot) {
     return;
   }
 
-  hideMetagraphScrapeDebugModal();
+  beginMetagraphTableAutomation();
+  try {
+    hideMetagraphScrapeDebugModal();
 
-  const host = document.createElement('div');
+    const host = document.createElement('div');
   host.className = 'tao-analytics-debug-modal-host';
   host.innerHTML = `
     <div class="tao-analytics-debug-modal-backdrop" data-close="1"></div>
@@ -1316,7 +1463,7 @@ function showMetagraphScrapeDebugModal(snapshot) {
       <div class="tao-analytics-debug-modal-header">
         <div>
           <p class="tao-analytics-debug-eyebrow">Metagraph scrape debug</p>
-          <h2 id="tao-analytics-debug-title">Subnet ${snapshot.netuid} scrape succeeded</h2>
+          <h2 id="tao-analytics-debug-title">Subnet ${snapshot.netuid} ${snapshot.diagnostics?.preview ? 'metagraph debug' : 'scrape succeeded'}</h2>
         </div>
         <button type="button" class="tao-analytics-debug-close" aria-label="Close">×</button>
       </div>
@@ -1332,7 +1479,8 @@ function showMetagraphScrapeDebugModal(snapshot) {
             <h3>Miners</h3>
             <p class="tao-analytics-debug-value">${formatDebugValue(snapshot.minerCount)}</p>
             <p class="tao-analytics-debug-meta">Top emissions: ${formatDebugValue(snapshot.topMinerEmissions)}</p>
-            <p class="tao-analytics-debug-meta">Count excludes owner row</p>
+            <p class="tao-analytics-debug-meta">Count excludes owner; incentive &gt; 0</p>
+            <p class="tao-analytics-debug-meta">Pages scanned: ${formatDebugValue(snapshot.diagnostics?.pagesScanned)}</p>
             <p class="tao-analytics-debug-meta">Cache: ${formatCacheStatus(snapshot.minersCacheStatus)}</p>
           </div>
           <div class="tao-analytics-debug-card">
@@ -1342,10 +1490,20 @@ function showMetagraphScrapeDebugModal(snapshot) {
             <p class="tao-analytics-debug-meta">updatedAt: ${snapshot.cacheUpdatedAt ? new Date(snapshot.cacheUpdatedAt).toLocaleString() : '—'}</p>
           </div>
           <div class="tao-analytics-debug-card">
+            <h3>Incentive sort</h3>
+            <p class="tao-analytics-debug-value tao-analytics-debug-cache-${snapshot.incentiveSortState === 'down' ? 'updated' : snapshot.incentiveSortState === 'up' || snapshot.incentiveSortState === 'unmarked' ? 'unchanged' : 'missing'}">${formatIncentiveSortStateLabel(snapshot.incentiveSortState)}</p>
+            <p class="tao-analytics-debug-meta">Chevron in button: ${snapshot.incentiveSortInsight?.hasChevron ? 'yes' : 'no'}</p>
+            <p class="tao-analytics-debug-meta">Chevron direction: ${formatDebugValue(snapshot.incentiveSortInsight?.chevronDirection)}</p>
+            <p class="tao-analytics-debug-meta">Cache sort ready: ${snapshot.incentiveSortReady ? 'yes' : 'no'}</p>
+            <p class="tao-analytics-debug-meta">Sort action: ${formatDebugValue(snapshot.sortAction)}</p>
+            <p class="tao-analytics-debug-meta">Sort skipped: ${snapshot.sortSkipped ? 'yes' : 'no'}</p>
+          </div>
+          <div class="tao-analytics-debug-card">
             <h3>Page state</h3>
             <p class="tao-analytics-debug-meta">Table: ${snapshot.tableFound ? 'found' : 'missing'}</p>
-            <p class="tao-analytics-debug-meta">Incentive sorted ↓: ${snapshot.incentiveSortedDesc ? 'yes' : 'no'}</p>
             <p class="tao-analytics-debug-meta">Page ready: ${snapshot.pageReady ? 'yes' : 'no'}</p>
+            <p class="tao-analytics-debug-meta">aria-sort: ${formatDebugValue(snapshot.incentiveSortInsight?.ariaSort)}</p>
+            <p class="tao-analytics-debug-meta">Rows sorted ↓: ${snapshot.incentiveSortInsight?.rowsSortedDesc ? 'yes' : 'no'}</p>
           </div>
         </div>
         <div class="tao-analytics-debug-section">
@@ -1410,6 +1568,9 @@ function showMetagraphScrapeDebugModal(snapshot) {
   document.documentElement.classList.add('tao-analytics-debug-modal-open');
   document.body.appendChild(host);
   metagraphDebugModalHost = host;
+  } finally {
+    endMetagraphTableAutomation();
+  }
 }
 
 function maybeShowMetagraphScrapeDebugModal(netuid, scrapeDetails) {
@@ -1417,7 +1578,13 @@ function maybeShowMetagraphScrapeDebugModal(netuid, scrapeDetails) {
     return;
   }
 
+  if (scrapeDetails.diagnostics?.preview) {
+    return;
+  }
+
   const signature = [
+    scrapeDetails.incentiveSortInsight?.visualState ?? scrapeDetails.diagnostics?.incentiveSortState,
+    scrapeDetails.sortAction ?? scrapeDetails.diagnostics?.sortAction,
     scrapeDetails.ownerIncentive,
     scrapeDetails.minerCount,
     (scrapeDetails.topEmissions || []).join(','),
@@ -1429,8 +1596,20 @@ function maybeShowMetagraphScrapeDebugModal(netuid, scrapeDetails) {
     return;
   }
 
-  lastMetagraphDebugSignature = signature;
-  showMetagraphScrapeDebugModal(buildMetagraphScrapeDebugSnapshot(netuid, scrapeDetails));
+  if (metagraphDebugModalTimer != null) {
+    clearTimeout(metagraphDebugModalTimer);
+    metagraphDebugModalTimer = null;
+  }
+
+  metagraphDebugModalTimer = setTimeout(() => {
+    metagraphDebugModalTimer = null;
+    if (signature === lastMetagraphDebugSignature) {
+      return;
+    }
+
+    lastMetagraphDebugSignature = signature;
+    showMetagraphScrapeDebugModal(buildMetagraphScrapeDebugSnapshot(netuid, scrapeDetails));
+  }, 400);
 }
 
 function buildAboutScrapeDebugSnapshot(netuid, scrapeDetails = {}) {
@@ -1591,8 +1770,35 @@ function parseIncentiveCellValue(text) {
     return null;
   }
 
-  const value = Number(normalized.replace(/,/g, ''));
+  const cleaned = normalized.replace(/,/g, '').replace(/%$/, '').trim();
+  const value = Number(cleaned);
   return Number.isFinite(value) ? value : null;
+}
+
+function parseIncentiveFromCell(cell) {
+  if (!(cell instanceof Element)) {
+    return parseIncentiveCellValue(String(cell ?? ''));
+  }
+
+  const sources = [
+    cell.textContent,
+    cell.getAttribute('aria-label'),
+    cell.getAttribute('title'),
+    cell.querySelector('.font-bold, .font-semibold, [data-value]')?.textContent,
+  ];
+
+  for (const source of sources) {
+    const value = parseIncentiveCellValue(source);
+    if (value != null) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function isMinerIncentiveActive(incentive) {
+  return incentive != null && Number.isFinite(incentive) && incentive > MINER_INCENTIVE_EPSILON;
 }
 
 function findMetagraphPaginationRoot(tableInfo) {
@@ -1666,104 +1872,367 @@ function findMetagraphIncentiveSortButton(tableInfo) {
 
   const headers = [...headerRow.querySelectorAll('th')];
   const th = headers[tableInfo.incentiveIdx];
-  return th?.querySelector('button') ?? null;
+  if (!th) {
+    return null;
+  }
+
+  for (const button of th.querySelectorAll('button')) {
+    if (/incentive/i.test(normalizeText(button.textContent))) {
+      return button;
+    }
+  }
+
+  return th.querySelector('button');
+}
+
+function getMetagraphIncentiveSortContext(tableInfo) {
+  const button = findMetagraphIncentiveSortButton(tableInfo);
+  if (!button) {
+    return null;
+  }
+
+  const th = button.closest('th');
+  const svg = button.querySelector('svg');
+  const svgClass = svg?.getAttribute('class') ?? svg?.className?.toString() ?? '';
+  const svgStyle = svg?.getAttribute('style') ?? '';
+  const svgRotatedUp =
+    /\brotate-180\b/.test(svgClass) || /rotate\(180deg\)/i.test(svgStyle);
+
+  const ariaSort =
+    th?.getAttribute('aria-sort') ||
+    button.getAttribute('aria-sort') ||
+    '';
+
+  return { button, th, svg, svgRotatedUp, ariaSort, hasChevron: Boolean(svg) };
+}
+
+/**
+ * tao.app Incentive sort button (DOM inspection):
+ * - unmarked: button has "Incentive" text only — no <svg> chevron
+ * - down:     has <svg> chevron without rotate-180 (below, sorted desc)
+ * - up:       has <svg> with rotate-180 (upper, ascending)
+ */
+function getMetagraphIncentiveSortVisualState(tableInfo) {
+  const ctx = getMetagraphIncentiveSortContext(tableInfo);
+  if (!ctx) {
+    return 'unknown';
+  }
+
+  if (!ctx.hasChevron) {
+    return 'unmarked';
+  }
+
+  if (ctx.svgRotatedUp || ctx.ariaSort === 'ascending') {
+    return 'up';
+  }
+
+  if (ctx.hasChevron && !ctx.svgRotatedUp) {
+    return 'down';
+  }
+
+  return 'unknown';
+}
+
+function buildMetagraphIncentiveSortInsight(tableInfo) {
+  const ctx = getMetagraphIncentiveSortContext(tableInfo);
+  const visualState = tableInfo ? getMetagraphIncentiveSortVisualState(tableInfo) : 'unknown';
+
+  if (!ctx) {
+    return {
+      visualState,
+      sortReady: visualState === 'down',
+      hasChevron: false,
+      chevronDirection: null,
+      ariaSort: null,
+      buttonDataState: null,
+      rowsSortedDesc: false,
+    };
+  }
+
+  return {
+    visualState,
+    sortReady: visualState === 'down',
+    hasChevron: ctx.hasChevron,
+    chevronDirection: !ctx.hasChevron ? null : ctx.svgRotatedUp ? 'up' : 'down',
+    ariaSort: ctx.ariaSort || 'none',
+    buttonDataState: ctx.button.getAttribute('data-state'),
+    rowsSortedDesc: isMetagraphIncentiveSortedDescByValues(tableInfo),
+  };
+}
+
+function formatIncentiveSortStateLabel(state) {
+  switch (state) {
+    case 'down':
+      return 'Below (sorted ↓)';
+    case 'up':
+      return 'Upper (↑)';
+    case 'unmarked':
+      return 'Unmarked';
+    default:
+      return state || 'Unknown';
+  }
+}
+
+async function persistIncentiveSortCache(netuid, insight, sortReady) {
+  if (netuid == null || !insight) {
+    return null;
+  }
+
+  const patch = {
+    incentiveSortReady: sortReady === true,
+    incentiveSortState: insight.visualState,
+    incentiveSortInsight: {
+      visualState: insight.visualState,
+      hasChevron: insight.hasChevron,
+      chevronDirection: insight.chevronDirection,
+      ariaSort: insight.ariaSort,
+      rowsSortedDesc: insight.rowsSortedDesc,
+    },
+    incentiveSortCapturedAt: Date.now(),
+  };
+
+  const result = await upsertMetricCache(netuid, patch);
+  return result?.entry ?? null;
 }
 
 function isMetagraphIncentiveSortArrowUp(tableInfo) {
-  const button = findMetagraphIncentiveSortButton(tableInfo);
-  if (!button) {
-    return false;
-  }
-
-  const th = button.closest('th');
-  const aria = th?.getAttribute('aria-sort');
-  if (aria === 'ascending') {
-    return true;
-  }
-  if (aria === 'descending') {
-    return false;
-  }
-
-  const svg = button.querySelector('svg');
-  if (!svg) {
-    return false;
-  }
-
-  const cls = svg.className?.toString() ?? '';
-  const style = svg.getAttribute('style') ?? '';
-  return /rotate-180|scale-y-\[-1\]|rotate\(180deg\)/i.test(`${cls} ${style}`);
+  return getMetagraphIncentiveSortVisualState(tableInfo) === 'up';
 }
 
 function isMetagraphIncentiveSortArrowDown(tableInfo) {
-  const button = findMetagraphIncentiveSortButton(tableInfo);
-  if (!button) {
-    return false;
-  }
-
-  const th = button.closest('th');
-  const aria = th?.getAttribute('aria-sort');
-  if (aria === 'descending') {
-    return true;
-  }
-  if (aria === 'ascending') {
-    return false;
-  }
-
-  const svg = button.querySelector('svg');
-  if (!svg) {
-    return false;
-  }
-
-  const cls = svg.className?.toString() ?? '';
-  const style = svg.getAttribute('style') ?? '';
-  const arrowPointsUp = /rotate-180|scale-y-\[-1\]|rotate\(180deg\)/i.test(`${cls} ${style}`);
-
-  // tao.app uses a down-chevron SVG; rotate-180 flips it to point up (ascending).
-  return !arrowPointsUp;
+  return getMetagraphIncentiveSortVisualState(tableInfo) === 'down';
 }
 
 function isMetagraphIncentiveSortedDesc(tableInfo) {
   return isMetagraphIncentiveSortArrowDown(tableInfo);
 }
 
-async function ensureMetagraphIncentiveSortDesc(tableInfo) {
-  if (isMetagraphIncentiveSortedDesc(tableInfo)) {
-    return tableInfo;
-  }
+function isMetagraphIncentiveSortedDescByValues(tableInfo) {
+  let last = Infinity;
+  let saw = 0;
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    if (isMetagraphIncentiveSortedDesc(tableInfo)) {
-      return tableInfo;
+  for (const row of tableInfo.table.querySelectorAll('tbody tr')) {
+    if (isMetagraphOwnerMinerRow(row, tableInfo)) {
+      continue;
     }
 
-    const sortButton = findMetagraphIncentiveSortButton(tableInfo);
-    if (!sortButton) {
-      return tableInfo;
+    const cells = [...row.querySelectorAll('td')];
+    const incentive = parseIncentiveFromCell(cells[tableInfo.incentiveIdx]);
+    if (incentive == null) {
+      continue;
     }
 
-    sortButton.click();
-    await delay(500);
-    tableInfo = findMetagraphTable() || tableInfo;
+    saw += 1;
+    if (incentive > last + 1e-9) {
+      return false;
+    }
+    last = incentive;
   }
 
-  return tableInfo;
+  return saw > 0;
 }
 
-async function prepareMetagraphTableForScrape() {
-  let tableInfo = findMetagraphTable();
+async function ensureMetagraphIncentiveSortDesc(tableInfo, netuid = null) {
+  const buildResult = (resolvedTable, insight, sortSkipped, sortAction, cacheSortReady = null) => ({
+    tableInfo: resolvedTable,
+    sortInsight: insight,
+    sortSkipped,
+    sortAction,
+    cacheSortReady: cacheSortReady ?? insight.sortReady,
+  });
+
+  if (isMetagraphIncentiveSortLocked() || metagraphIncentiveSortInProgress) {
+    const current = findMetagraphTable() || tableInfo;
+    const insight = buildMetagraphIncentiveSortInsight(current);
+    return buildResult(current, insight, true, 'session_locked');
+  }
+
+  tableInfo = findMetagraphTable() || tableInfo;
+  let insight = buildMetagraphIncentiveSortInsight(tableInfo);
+  let state = insight.visualState;
+
+  if (state === 'down') {
+    markMetagraphIncentiveSortLocked();
+    if (netuid != null) {
+      await persistIncentiveSortCache(netuid, insight, true);
+    }
+    return buildResult(tableInfo, insight, true, 'already_below', true);
+  }
+
+  if (state !== 'up' && state !== 'unmarked') {
+    markMetagraphIncentiveSortLocked();
+    return buildResult(tableInfo, insight, true, 'unknown_state');
+  }
+
+  if (netuid != null) {
+    await persistIncentiveSortCache(netuid, insight, false);
+  }
+
+  metagraphIncentiveSortInProgress = true;
+  let sortAction = 'clicked_once';
+  try {
+    const button = findMetagraphIncentiveSortButton(tableInfo);
+    if (button) {
+      button.click();
+      await delay(200);
+      tableInfo = await waitForMetagraphSortSettle(tableInfo);
+    }
+
+    insight = buildMetagraphIncentiveSortInsight(tableInfo);
+    state = insight.visualState;
+    const sortReady = state === 'down';
+
+    markMetagraphIncentiveSortLocked();
+    if (netuid != null) {
+      await persistIncentiveSortCache(netuid, insight, sortReady);
+    }
+
+    return buildResult(tableInfo, insight, false, sortAction, sortReady);
+  } finally {
+    metagraphIncentiveSortInProgress = false;
+  }
+}
+
+async function prepareMetagraphTableForScrape(netuid = null) {
+  let tableInfo = await waitForMetagraphTableReady();
   if (!tableInfo) {
     return null;
   }
 
-  if (!isMetagraphIncentiveSortedDesc(tableInfo)) {
-    tableInfo = await ensureMetagraphIncentiveSortDesc(tableInfo);
+  if (isMetagraphIncentiveSortLocked()) {
+    const insight = buildMetagraphIncentiveSortInsight(tableInfo);
+    return {
+      tableInfo,
+      sortResult: {
+        tableInfo,
+        sortInsight: insight,
+        sortSkipped: true,
+        sortAction: 'session_locked',
+        cacheSortReady: insight.sortReady,
+      },
+    };
   }
 
-  if (!isMetagraphIncentiveSortedDesc(tableInfo)) {
+  if (metagraphIncentiveSortInProgress) {
+    tableInfo = await waitForMetagraphSortSettle(tableInfo);
+    const settled = findMetagraphTable() || tableInfo;
+    const insight = buildMetagraphIncentiveSortInsight(settled);
+    return {
+      tableInfo: settled,
+      sortResult: {
+        tableInfo: settled,
+        sortInsight: insight,
+        sortSkipped: true,
+        sortAction: 'sort_in_progress',
+        cacheSortReady: insight.sortReady,
+      },
+    };
+  }
+
+  const cacheEntry = netuid != null ? await resolveCacheEntryForNetuid(netuid) : null;
+  let insight = buildMetagraphIncentiveSortInsight(tableInfo);
+  if (cacheEntry?.incentiveSortReady === true && insight.visualState === 'down') {
+    markMetagraphIncentiveSortLocked();
+    return {
+      tableInfo,
+      sortResult: {
+        tableInfo,
+        sortInsight: insight,
+        sortSkipped: true,
+        sortAction: 'cache_skip',
+        cacheSortReady: true,
+      },
+    };
+  }
+
+  if (insight.visualState === 'down') {
+    markMetagraphIncentiveSortLocked();
+    if (netuid != null) {
+      await persistIncentiveSortCache(netuid, insight, true);
+    }
+    return {
+      tableInfo,
+      sortResult: {
+        tableInfo,
+        sortInsight: insight,
+        sortSkipped: true,
+        sortAction: 'already_below',
+        cacheSortReady: true,
+      },
+    };
+  }
+
+  const sortResult = await ensureMetagraphIncentiveSortDesc(tableInfo, netuid);
+  return {
+    tableInfo: sortResult.tableInfo,
+    sortResult,
+  };
+}
+
+function findMetagraphTableScrollContainer(tableInfo) {
+  let node = tableInfo?.table?.parentElement ?? null;
+
+  for (let depth = 0; depth < 12 && node instanceof Element; depth += 1) {
+    const style = getComputedStyle(node);
+    if (/(auto|scroll|overlay)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 4) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+
+  return null;
+}
+
+async function revealAllMetagraphRowsOnPage(tableInfo) {
+  const container = findMetagraphTableScrollContainer(tableInfo);
+  if (!container || container.scrollHeight <= container.clientHeight + 4) {
+    return tableInfo;
+  }
+
+  let lastHeight = -1;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    container.scrollTop = container.scrollHeight;
+    await delay(180);
+
+    const refreshed = findMetagraphTable();
+    if (refreshed) {
+      tableInfo = refreshed;
+    }
+
+    const atBottom =
+      container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
+    if (atBottom && container.scrollHeight === lastHeight) {
+      break;
+    }
+
+    lastHeight = container.scrollHeight;
+  }
+
+  container.scrollTop = 0;
+  await delay(120);
+  return findMetagraphTable() || tableInfo;
+}
+
+function getMetagraphPaginationState(tableInfo) {
+  const root = findMetagraphPaginationRoot(tableInfo);
+  if (!root) {
     return null;
   }
 
-  return tableInfo;
+  const match = normalizeText(root.textContent).match(/(\d+)\s*\/\s*(\d+)/);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    current: Number(match[1]),
+    total: Number(match[2]),
+  };
+}
+
+function isMetagraphOnFirstPage(tableInfo) {
+  const state = getMetagraphPaginationState(tableInfo);
+  return state ? state.current === 1 : true;
 }
 
 async function goToMetagraphFirstPage(tableInfo) {
@@ -1803,8 +2272,8 @@ function metagraphPageHasOnlyZeroIncentives(tableInfo) {
 
     sawNonOwner = true;
     const cells = [...row.querySelectorAll('td')];
-    const incentive = parseIncentiveCellValue(cells[tableInfo.incentiveIdx]?.textContent);
-    if (incentive != null && incentive > 0) {
+    const incentive = parseIncentiveFromCell(cells[tableInfo.incentiveIdx]);
+    if (isMinerIncentiveActive(incentive)) {
       return false;
     }
   }
@@ -1853,10 +2322,10 @@ function collectPositiveIncentiveUidsFromMetagraphPage(tableInfo) {
     }
 
     const cells = [...row.querySelectorAll('td')];
-    const uid = parseMinerUid(cells[tableInfo.uidIdx]?.textContent);
-    const incentive = parseIncentiveCellValue(cells[tableInfo.incentiveIdx]?.textContent);
+    const uid = parseMinerUidFromCell(cells[tableInfo.uidIdx]);
+    const incentive = parseIncentiveFromCell(cells[tableInfo.incentiveIdx]);
 
-    if (uid != null && incentive != null && incentive > 0) {
+    if (uid != null && isMinerIncentiveActive(incentive)) {
       positiveUids.add(uid);
     }
   });
@@ -1899,8 +2368,8 @@ function collectTopMinerEmissionsFromMetagraphPage(tableInfo, limit = 3) {
     }
 
     const cells = [...row.querySelectorAll('td')];
-    const incentive = parseIncentiveCellValue(cells[tableInfo.incentiveIdx]?.textContent);
-    if (incentive == null || incentive <= 0) {
+    const incentive = parseIncentiveFromCell(cells[tableInfo.incentiveIdx]);
+    if (!isMinerIncentiveActive(incentive)) {
       continue;
     }
 
@@ -1928,58 +2397,93 @@ function topMinerEmissionsEqual(left, right) {
   return a.every((value, index) => Number(value) === Number(b[index]));
 }
 
-async function collectIncentiveMinerCountFromMetagraphTable() {
-  let tableInfo = await prepareMetagraphTableForScrape();
-  if (!tableInfo) {
+async function collectIncentiveMinerCountFromMetagraphTable(netuid = null) {
+  if (isMetagraphTableAutomationActive()) {
     return null;
   }
 
-  tableInfo = await goToMetagraphFirstPage(tableInfo);
-
-  const topEmissions = collectTopMinerEmissionsFromMetagraphPage(tableInfo, 3);
-  const positiveUids = new Set();
-  let pages = 0;
-
-  while (pages < 40) {
-    collectPositiveIncentiveUidsFromMetagraphPage(tableInfo).forEach((uid) => {
-      positiveUids.add(uid);
-    });
-
-    if (positiveUids.size > MINER_COUNT_DISPLAY_CAP) {
-      break;
+  beginMetagraphTableAutomation();
+  try {
+    const prepared = await prepareMetagraphTableForScrape(netuid);
+    if (!prepared?.tableInfo) {
+      return null;
     }
 
-    if (metagraphPageHasOnlyZeroIncentives(tableInfo)) {
-      break;
+    let tableInfo = prepared.tableInfo;
+    const sortResult = prepared.sortResult ?? null;
+
+    if (!isMetagraphOnFirstPage(tableInfo)) {
+      tableInfo = await goToMetagraphFirstPage(tableInfo);
     }
 
-    const next = findMetagraphPaginationNext(tableInfo);
-    if (!next) {
-      break;
+    tableInfo = await revealAllMetagraphRowsOnPage(tableInfo);
+
+    const topEmissions = collectTopMinerEmissionsFromMetagraphPage(tableInfo, 3);
+    const positiveUids = new Set();
+    let pages = 0;
+    let zeroOnlyStreak = 0;
+
+    while (pages < 40) {
+      tableInfo = await revealAllMetagraphRowsOnPage(tableInfo);
+
+      collectPositiveIncentiveUidsFromMetagraphPage(tableInfo).forEach((uid) => {
+        positiveUids.add(uid);
+      });
+
+      if (positiveUids.size > MINER_COUNT_DISPLAY_CAP) {
+        break;
+      }
+
+      if (metagraphPageHasOnlyZeroIncentives(tableInfo)) {
+        zeroOnlyStreak += 1;
+        if (zeroOnlyStreak >= 2) {
+          break;
+        }
+      } else {
+        zeroOnlyStreak = 0;
+      }
+
+      const next = findMetagraphPaginationNext(tableInfo);
+      if (!next) {
+        break;
+      }
+
+      const before = tableInfo.table.querySelector('tbody')?.textContent ?? '';
+      next.click();
+      await delay(500);
+
+      const refreshed = findMetagraphTable();
+      if (!refreshed) {
+        break;
+      }
+
+      const after = refreshed.table.querySelector('tbody')?.textContent ?? '';
+      if (after === before) {
+        break;
+      }
+
+      tableInfo = refreshed;
+      pages += 1;
     }
 
-    const before = tableInfo.table.querySelector('tbody')?.textContent ?? '';
-    next.click();
-    await delay(500);
-
-    const refreshed = findMetagraphTable();
-    if (!refreshed) {
-      break;
-    }
-
-    const after = refreshed.table.querySelector('tbody')?.textContent ?? '';
-    if (after === before) {
-      break;
-    }
-
-    tableInfo = refreshed;
-    pages += 1;
+    return {
+      count: positiveUids.size,
+      topEmissions,
+      sortResult,
+      diagnostics: {
+        pagesScanned: pages + 1,
+        sortedDesc: isMetagraphIncentiveSortArrowDown(tableInfo),
+        minerUids: [...positiveUids].sort((a, b) => a - b),
+        incentiveSortState: sortResult?.sortInsight?.visualState ?? null,
+        incentiveSortInsight: sortResult?.sortInsight ?? null,
+        sortAction: sortResult?.sortAction ?? null,
+        sortSkipped: sortResult?.sortSkipped ?? null,
+        cacheSortReady: sortResult?.cacheSortReady ?? null,
+      },
+    };
+  } finally {
+    endMetagraphTableAutomation();
   }
-
-  return {
-    count: positiveUids.size,
-    topEmissions,
-  };
 }
 
 function collectOwnerIncentiveFromDom() {
@@ -2048,7 +2552,7 @@ function collectOwnerIncentiveFromDom() {
   // On metagraph: no yellow/orange owner incentive visible → burn rate is 0.
   if (isMetagraphScrapePageReady()) {
     const readyTable = findMetagraphTable();
-    if (readyTable && !isMetagraphIncentiveSortedDesc(readyTable)) {
+    if (readyTable && !isMetagraphIncentiveSortArrowDown(readyTable)) {
       return null;
     }
     return 0;
@@ -4340,6 +4844,7 @@ function initSubnetPageScrape() {
     lastRegSignatureRef.value = null;
     lastMetagraphDebugSignature = null;
     lastAboutDebugSignature = null;
+    resetMetagraphIncentiveSortLock();
   };
 
   const onSubnetTabContextChange = () => {
@@ -4368,6 +4873,11 @@ function initSubnetPageScrape() {
       clearInterval(burst);
       burst = null;
     }
+    if (metagraphDebugModalTimer != null) {
+      clearTimeout(metagraphDebugModalTimer);
+      metagraphDebugModalTimer = null;
+    }
+    hideMetagraphScrapeDebugModal();
     observer?.disconnect();
     observer = null;
   };
@@ -4442,7 +4952,29 @@ function initSubnetPageScrape() {
   };
 
   const scrapeIncentiveMinerCount = async () => {
-    const minerMetrics = await collectIncentiveMinerCountFromMetagraphTable();
+    if (
+      lastIncentiveMinerCount != null &&
+      lastTopMinerEmissions != null &&
+      (isMetagraphIncentiveSortLocked() ||
+        getMetagraphIncentiveSortVisualState(findMetagraphTable()) === 'down')
+    ) {
+      const cacheEntry = await resolveCacheEntryForNetuid(netuid);
+      return {
+        success: true,
+        minerCount: lastIncentiveMinerCount,
+        topEmissions: lastTopMinerEmissions,
+        minersCacheStatus: 'unchanged',
+        cacheEntry,
+        diagnostics: {
+          incentiveSortState: cacheEntry?.incentiveSortState ?? 'down',
+          cacheSortReady: cacheEntry?.incentiveSortReady === true,
+          sortSkipped: true,
+          sortAction: 'miner_cache_skip',
+        },
+      };
+    }
+
+    const minerMetrics = await collectIncentiveMinerCountFromMetagraphTable(netuid);
     if (minerMetrics == null || minerMetrics.count == null) {
       return {
         success: false,
@@ -4453,7 +4985,7 @@ function initSubnetPageScrape() {
       };
     }
 
-    const { count: minerCount, topEmissions } = minerMetrics;
+    const { count: minerCount, topEmissions, diagnostics: minerDiagnostics } = minerMetrics;
     if (
       minerCount === lastIncentiveMinerCount &&
       topMinerEmissionsEqual(topEmissions, lastTopMinerEmissions)
@@ -4464,6 +4996,7 @@ function initSubnetPageScrape() {
         topEmissions,
         minersCacheStatus: 'unchanged',
         cacheEntry: await resolveCacheEntryForNetuid(netuid),
+        diagnostics: minerDiagnostics,
       };
     }
 
@@ -4483,6 +5016,7 @@ function initSubnetPageScrape() {
         topEmissions,
         minersCacheStatus: 'updated',
         cacheEntry: upsert.entry ?? (await resolveCacheEntryForNetuid(netuid)),
+        diagnostics: minerDiagnostics,
       };
     }
 
@@ -4492,6 +5026,7 @@ function initSubnetPageScrape() {
       topEmissions,
       minersCacheStatus: 'failed',
       cacheEntry: await resolveCacheEntryForNetuid(netuid),
+      diagnostics: minerDiagnostics,
     };
   };
 
@@ -4629,9 +5164,20 @@ function initSubnetPageScrape() {
               minersCacheStatus: minerResult.minersCacheStatus,
               overallCacheStatus,
               cacheEntry,
+              incentiveSortInsight: minerResult.diagnostics?.incentiveSortInsight ?? null,
+              sortAction: minerResult.diagnostics?.sortAction ?? null,
+              sortSkipped: minerResult.diagnostics?.sortSkipped ?? null,
               diagnostics: {
                 ownerSuccess: ownerResult.success,
                 minersSuccess: minerResult.success,
+                pagesScanned: minerResult.diagnostics?.pagesScanned ?? null,
+                minerUids: minerResult.diagnostics?.minerUids ?? null,
+                sortedDesc: minerResult.diagnostics?.sortedDesc ?? null,
+                incentiveSortState: minerResult.diagnostics?.incentiveSortState ?? null,
+                incentiveSortInsight: minerResult.diagnostics?.incentiveSortInsight ?? null,
+                sortAction: minerResult.diagnostics?.sortAction ?? null,
+                sortSkipped: minerResult.diagnostics?.sortSkipped ?? null,
+                cacheSortReady: minerResult.diagnostics?.cacheSortReady ?? null,
               },
             });
           }
@@ -4671,9 +5217,18 @@ function initSubnetPageScrape() {
 
   tryScrape();
 
-  observer = new MutationObserver(() => {
+  observer = new MutationObserver((mutations) => {
     if (!isExtensionContextValid()) {
       teardownSubnetScrape();
+      return;
+    }
+    if (isMetagraphTableAutomationActive()) {
+      return;
+    }
+    if (metagraphDebugModalHost) {
+      return;
+    }
+    if (isExtensionUiMutation(mutations)) {
       return;
     }
     tryScrape();
