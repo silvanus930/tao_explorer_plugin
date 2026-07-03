@@ -17,6 +17,7 @@ const MESSAGE = {
   SHEETS_SYNC: 'SHEETS_SYNC',
   SHEETS_CREATE: 'SHEETS_CREATE',
   SHEETS_PULL_IF_ENABLED: 'SHEETS_PULL_IF_ENABLED',
+  REFRESH_V2_METRICS: 'REFRESH_V2_METRICS',
 };
 
 const COLUMN = {
@@ -34,16 +35,26 @@ const COLUMN_WIDTH_MINERS_EXPANDED = 200;
 const MINERS_EMISSIONS_PREF_KEY = 'showMinerEmissions';
 const HIDE_SUBNET_TRADING_VIEW_KEY = 'hideSubnetTradingView';
 const METagraph_SCRAPE_DEBUG_KEY = 'metagraphScrapeDebug';
+const ENABLE_V2_KEY = 'enableV2';
+const EXPLORER_DATA_SOURCE_KEY = 'explorerDataSource';
 
 const MINER_COUNT_DISPLAY_CAP = 40;
 const SUBNET_NETUID_MAX = 128;
 const METAGRAPH_TABLE_SORT_SETTLE_MS = 350;
 
 const STORAGE_CACHE_KEY = 'subnetMetricsCache';
+const STORAGE_CACHE_V2_KEY = 'subnetMetricsCache_v2';
 const SYNC_STATUS_KEY = 'subnetSyncStatus';
 const DEFAULT_CACHE_TTL_MS = 10 * 60 * 1000;
 
 let metrics = new Map();
+let metricsV2 = new Map();
+let enableV2 = false;
+let explorerDataSource = 'scraped';
+let v2RefreshRunning = false;
+let v2RefreshError = null;
+let v2RefreshPromise = null;
+const V2_REFRESH_MESSAGE_TIMEOUT_MS = 80_000;
 let tableObserver = null;
 let observedTbody = null;
 let isEnhancing = false;
@@ -193,6 +204,20 @@ function sendRuntimeMessage(message) {
     return Promise.resolve(null);
   }
   return chrome.runtime.sendMessage(message).catch(() => null);
+}
+
+function sendRuntimeMessageWithTimeout(message, timeoutMs = V2_REFRESH_MESSAGE_TIMEOUT_MS) {
+  return Promise.race([
+    sendRuntimeMessage(message),
+    new Promise((resolve) => {
+      setTimeout(() => {
+        resolve({
+          ok: false,
+          error: `Refresh timed out after ${Math.round(timeoutMs / 1000)}s — reload the extension and try again`,
+        });
+      }, timeoutMs);
+    }),
+  ]);
 }
 
 async function getLocalStorage(keys) {
@@ -442,6 +467,18 @@ function isRegFeeKnown(data) {
       (data.burnTao != null ||
         (data.burnUsd != null && Number.isFinite(Number(data.burnUsd))))
   );
+}
+
+function getRowMetrics(netuid) {
+  if (enableV2 && explorerDataSource === 'v2') {
+    return metricsV2.get(netuid) ?? null;
+  }
+
+  return metrics.get(netuid) ?? null;
+}
+
+function isV2DataSourceActive() {
+  return enableV2 && explorerDataSource === 'v2';
 }
 
 function formatRegFeeDisplay(data, taoUsd) {
@@ -796,12 +833,120 @@ function updateSyncButton(status) {
     return;
   }
 
+  if (isV2DataSourceActive()) {
+    btn.title = v2RefreshError
+      ? `Taostats v2 refresh failed: ${v2RefreshError}`
+      : metricsV2.size > 0
+        ? `Fetch burn rate, reg fee, and active miners from taostats.io (${metricsV2.size} cached)`
+        : 'Fetch burn rate, reg fee, and active miners from taostats.io';
+    btn.disabled = v2RefreshRunning;
+    btn.classList.toggle('tao-analytics-sync-running', v2RefreshRunning);
+    if (v2RefreshRunning) {
+      label.textContent = 'Refreshing v2…';
+    } else if (metricsV2.size > 0) {
+      label.textContent = 'Refresh v2';
+    } else {
+      label.textContent = 'Refresh v2';
+    }
+    return;
+  }
+
   btn.title =
     'Sync all subnets: missing burn rate, reg fee, or miners first, then the rest';
 
   btn.disabled = false;
   btn.classList.remove('tao-analytics-sync-running');
   label.textContent = 'Sync All';
+}
+
+async function reloadV2CacheAndEnhance() {
+  const tableInfo = findSubnetTable();
+
+  try {
+    if (isV2DataSourceActive()) {
+      await loadAllV2MetricsFromCache();
+    }
+    if (tableInfo) {
+      await loadMetricsFromLocalCache(tableInfo);
+    }
+  } catch {
+    return false;
+  }
+
+  if (isV2DataSourceActive() && metricsV2.size === 0) {
+    console.warn(
+      '[TAO Subnet Analytics] No taostats v2 cache yet — click Refresh v2 (storage key: subnetMetricsCache_v2)'
+    );
+  }
+
+  if (!tableInfo) {
+    return metricsV2.size > 0;
+  }
+
+  isEnhancing = true;
+  try {
+    enhanceTable(tableInfo);
+  } finally {
+    isEnhancing = false;
+  }
+
+  return metricsV2.size > 0;
+}
+
+async function refreshV2MetricsAndEnhance() {
+  if (v2RefreshPromise) {
+    return v2RefreshPromise;
+  }
+
+  v2RefreshPromise = (async () => {
+    if (!enableV2) {
+      v2RefreshError = 'Enable taostats v2 in extension settings';
+      updateSyncButton();
+      syncDataSourceTabsUi();
+      return { ok: false, error: v2RefreshError };
+    }
+
+    v2RefreshRunning = true;
+    v2RefreshError = null;
+    updateSyncButton();
+    syncDataSourceTabsUi();
+
+    await reloadV2CacheAndEnhance();
+
+    try {
+      const response = await sendRuntimeMessageWithTimeout({
+        type: MESSAGE.REFRESH_V2_METRICS,
+      });
+      if (!response) {
+        v2RefreshError = 'Extension background unavailable — reload the extension';
+        return { ok: false, error: v2RefreshError };
+      }
+
+      if (response.error || response.ok === false) {
+        v2RefreshError = response.error || 'Taostats v2 refresh failed';
+        console.warn('[TAO Subnet Analytics] v2 refresh failed:', response);
+        await reloadV2CacheAndEnhance();
+        return { ok: false, error: v2RefreshError, detail: response.detail };
+      }
+
+      await reloadV2CacheAndEnhance();
+
+      v2RefreshError = null;
+      const count = response.count ?? metricsV2.size;
+      console.info('[TAO Subnet Analytics] taostats v2 loaded', count, 'subnets');
+      return { ok: true, count };
+    } finally {
+      v2RefreshRunning = false;
+      updateSyncButton();
+      syncDataSourceTabsUi();
+    }
+  })();
+
+  try {
+    return await v2RefreshPromise;
+  } finally {
+    v2RefreshPromise = null;
+  }
 }
 
 function ensureSyncButton() {
@@ -826,6 +971,11 @@ function ensureSyncButton() {
     btn.appendChild(label);
 
     btn.addEventListener('click', async () => {
+      if (isV2DataSourceActive()) {
+        await refreshV2MetricsAndEnhance();
+        return;
+      }
+
       const status = await getLocalStorage(SYNC_STATUS_KEY);
       if (status?.[SYNC_STATUS_KEY]?.running) {
         await sendRuntimeMessage({ type: MESSAGE.CANCEL_SYNC });
@@ -1065,6 +1215,8 @@ function mergeCacheEntry(existing, incoming) {
     patch.ownerIncentiveCapturedAt,
     base.incentiveMinerCountCapturedAt,
     patch.incentiveMinerCountCapturedAt,
+    base.v2CapturedAt,
+    patch.v2CapturedAt,
   ]
     .map((value) => Number(value))
     .filter((value) => Number.isFinite(value) && value > 0);
@@ -1077,15 +1229,44 @@ function mergeCacheEntry(existing, incoming) {
   };
 }
 
+async function loadAllV2MetricsFromCache() {
+  const stored = await getLocalStorage(STORAGE_CACHE_V2_KEY);
+  const entry = stored?.[STORAGE_CACHE_V2_KEY] ?? null;
+  const value = entry?.value && typeof entry.value === 'object' ? entry.value : {};
+
+  Object.entries(value).forEach(([key, cached]) => {
+    if (!cached || typeof cached !== 'object') {
+      return;
+    }
+
+    const id = Number(cached.netuid ?? key);
+    if (!Number.isInteger(id) || id < 0) {
+      return;
+    }
+
+    const existingV2 = metricsV2.get(id);
+    metricsV2.set(
+      id,
+      existingV2 && typeof existingV2 === 'object'
+        ? mergeCacheEntry(existingV2, { ...cached, netuid: id })
+        : { ...cached, netuid: id }
+    );
+  });
+
+  return metricsV2.size;
+}
+
 async function loadMetricsFromLocalCache(tableInfo) {
   const netuids = collectVisibleNetuids(tableInfo);
   if (netuids.length === 0) {
     return;
   }
 
-  const stored = await getLocalStorage(STORAGE_CACHE_KEY);
+  const stored = await getLocalStorage([STORAGE_CACHE_KEY, STORAGE_CACHE_V2_KEY]);
   const entry = stored?.[STORAGE_CACHE_KEY] ?? null;
   const value = entry?.value && typeof entry.value === 'object' ? entry.value : {};
+  const entryV2 = stored?.[STORAGE_CACHE_V2_KEY] ?? null;
+  const valueV2 = entryV2?.value && typeof entryV2.value === 'object' ? entryV2.value : {};
 
   netuids.forEach((netuid) => {
     const cached =
@@ -1100,6 +1281,21 @@ async function loadMetricsFromLocalCache(tableInfo) {
         existing && typeof existing === 'object'
           ? mergeCacheEntry(existing, { ...cached, netuid: id })
           : { ...cached, netuid: id }
+      );
+    }
+
+    const cachedV2 =
+      valueV2[String(netuid)] ??
+      valueV2[netuid] ??
+      null;
+    if (cachedV2 && typeof cachedV2 === 'object') {
+      const id = Number(netuid);
+      const existingV2 = metricsV2.get(id);
+      metricsV2.set(
+        id,
+        existingV2 && typeof existingV2 === 'object'
+          ? mergeCacheEntry(existingV2, { ...cachedV2, netuid: id })
+          : { ...cachedV2, netuid: id }
       );
     }
   });
@@ -1762,6 +1958,131 @@ function bindMetagraphScrapeDebugPreferenceListener() {
   });
 
   bindMetagraphScrapeDebugPreferenceListener.bound = true;
+}
+
+async function loadEnableV2Preference() {
+  const stored = await getSyncStorage({ [ENABLE_V2_KEY]: false });
+  enableV2 = stored?.[ENABLE_V2_KEY] === true;
+  document.documentElement.dataset.taoAnalyticsEnableV2 = enableV2 ? 'on' : 'off';
+}
+
+async function loadExplorerDataSourcePreference() {
+  const stored = await getLocalStorage(EXPLORER_DATA_SOURCE_KEY);
+  const value = stored?.[EXPLORER_DATA_SOURCE_KEY];
+  explorerDataSource = value === 'v2' ? 'v2' : 'scraped';
+  document.documentElement.dataset.taoAnalyticsDataSource = explorerDataSource;
+}
+
+function bindEnableV2PreferenceListener() {
+  if (bindEnableV2PreferenceListener.bound) {
+    return;
+  }
+
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'sync' || !changes?.[ENABLE_V2_KEY]) {
+      return;
+    }
+
+    enableV2 = changes[ENABLE_V2_KEY].newValue === true;
+    document.documentElement.dataset.taoAnalyticsEnableV2 = enableV2 ? 'on' : 'off';
+    ensureDataSourceTabs();
+    if (enableV2) {
+      void refreshV2MetricsAndEnhance();
+    } else if (explorerDataSource === 'v2') {
+      void setExplorerDataSource('scraped');
+    } else {
+      scheduleCacheEnhance({ immediate: true });
+    }
+  });
+
+  bindEnableV2PreferenceListener.bound = true;
+}
+
+function syncDataSourceTabsUi() {
+  const tabs = document.getElementById('tao-analytics-data-source-tabs');
+  if (!tabs) {
+    return;
+  }
+
+  tabs.hidden = !enableV2;
+  tabs.querySelectorAll('[data-source]').forEach((btn) => {
+    const active = btn.dataset.source === explorerDataSource;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    btn.classList.toggle('is-loading', active && btn.dataset.source === 'v2' && v2RefreshRunning);
+    if (btn.dataset.source === 'v2' && v2RefreshError && active) {
+      btn.title = `Taostats v2 error: ${v2RefreshError}`;
+    } else if (btn.dataset.source === 'v2') {
+      btn.title = 'Burn rate, reg fee, and active miners from taostats.io API';
+    }
+  });
+
+  updateSyncButton();
+}
+
+async function setExplorerDataSource(source) {
+  explorerDataSource = source === 'v2' ? 'v2' : 'scraped';
+  document.documentElement.dataset.taoAnalyticsDataSource = explorerDataSource;
+  await setLocalStorage({ [EXPLORER_DATA_SOURCE_KEY]: explorerDataSource });
+  syncDataSourceTabsUi();
+  await reloadV2CacheAndEnhance();
+
+  if (explorerDataSource === 'v2') {
+    await refreshV2MetricsAndEnhance();
+  }
+}
+
+function buildDataSourceTabs() {
+  const wrapper = document.createElement('div');
+  wrapper.id = 'tao-analytics-data-source-tabs';
+  wrapper.className = 'tao-analytics-data-source-tabs';
+  wrapper.setAttribute('role', 'tablist');
+  wrapper.setAttribute('aria-label', 'Metrics data source');
+
+  const sources = [
+    { id: 'scraped', label: 'Scraped' },
+    { id: 'v2', label: 'Taostats v2' },
+  ];
+
+  sources.forEach(({ id, label }) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tao-analytics-data-source-tab';
+    btn.dataset.source = id;
+    btn.setAttribute('role', 'tab');
+    btn.textContent = label;
+    btn.title =
+      id === 'v2'
+        ? 'Burn rate, reg fee, and active miners from taostats.io API'
+        : 'Burn rate and reg fee from RPC scrape and tao.app pages';
+    btn.addEventListener('click', () => {
+      void setExplorerDataSource(id);
+    });
+    wrapper.appendChild(btn);
+  });
+
+  syncDataSourceTabsUi();
+  return wrapper;
+}
+
+function ensureDataSourceTabs() {
+  const anchor = findExplorerToolbarAnchor();
+  if (!anchor) {
+    return;
+  }
+
+  let tabs = document.getElementById('tao-analytics-data-source-tabs');
+  if (!tabs) {
+    tabs = buildDataSourceTabs();
+    const syncBtn = document.getElementById('tao-analytics-sync-btn');
+    if (syncBtn?.parentElement === anchor) {
+      anchor.insertBefore(tabs, syncBtn);
+    } else {
+      anchor.insertBefore(tabs, anchor.firstElementChild);
+    }
+  }
+
+  syncDataSourceTabsUi();
 }
 
 function parseIncentiveCellValue(text) {
@@ -4106,13 +4427,15 @@ function formatMinerCount(value, topEmissions) {
   return `${base} (${suffix})`;
 }
 
-function formatMinerCountTitle(value, topEmissions) {
+function formatMinerCountTitle(value, topEmissions, data = null) {
   if (!Number.isInteger(value) || value < 0) {
-    return 'Loading miner count';
+    return isV2DataSourceActive() ? 'Loading taostats miner count' : 'Loading miner count';
   }
 
   let title;
-  if (value > MINER_COUNT_DISPLAY_CAP) {
+  if (isV2DataSourceActive() || data?.source === 'taostats') {
+    title = `Active miners (taostats): ${value}`;
+  } else if (value > MINER_COUNT_DISPLAY_CAP) {
     title = `More than ${MINER_COUNT_DISPLAY_CAP} active miners with positive incentive (owner excluded)`;
   } else {
     title = `Active miners with positive incentive: ${value} (owner row excluded)`;
@@ -4178,7 +4501,7 @@ function getRowSortValue(row, tableInfo, sortKey, taoUsdPrice) {
     return null;
   }
 
-  const data = metrics.get(netuid);
+  const data = getRowMetrics(netuid);
 
   if (sortKey === 'burn') {
     if (isBurnRateKnown(data)) {
@@ -4333,6 +4656,14 @@ function createBodyCell(className, text, title, referenceTd, widthPx) {
 function buildBurnRateNode(netuid, valueText, isSyncing = false) {
   const wrapper = document.createElement('span');
   wrapper.className = 'tao-analytics-burn-inline inline-flex items-center';
+
+  if (isV2DataSourceActive()) {
+    const text = document.createElement('span');
+    text.className = 'tao-analytics-burn-value inline-flex items-center';
+    text.textContent = valueText;
+    wrapper.appendChild(text);
+    return wrapper;
+  }
 
   const btn = document.createElement('button');
   btn.type = 'button';
@@ -4500,26 +4831,45 @@ function enhanceRow(row, tableInfo, styleRef, taoUsdPrice) {
     return;
   }
 
-  const data = metrics.get(netuid);
+  const data = getRowMetrics(netuid);
   const taoUsd = taoUsdPrice ?? data?.taoUsd ?? scrapeTaoUsdPrice() ?? null;
   const regFee = formatRegFeeDisplay(data, taoUsd);
   const feeText = data ? regFee.text : '—';
-  const feeTitle = data ? regFee.title : 'Loading registration fee';
+  let feeTitle = data ? regFee.title : 'Loading registration fee';
   const burnKnown = isBurnRateKnown(data);
   const burnRate = burnKnown ? getBurnRateFromData(data) : null;
   const burnVisual = getBurnVisualState(data, burnRate);
   const burnDisplay = !data ? '—' : (burnKnown ? formatBurnRate(burnRate) : '—');
-  const burnTitle = !data
-    ? 'Loading burn rate'
+  let burnTitle = !data
+    ? isV2DataSourceActive() ? 'Loading taostats burn rate' : 'Loading burn rate'
     : burnKnown
       ? (isFullBurnRate(burnRate)
         ? `Burn rate: ${burnDisplay} (full)`
         : `Burn rate: ${burnDisplay}`)
-      : 'Burn rate unknown — click sync to load';
+      : isV2DataSourceActive()
+        ? 'Burn rate unknown in taostats cache'
+        : 'Burn rate unknown — click sync to load';
   const minerCount = getIncentiveMinerCountFromData(data);
   const topEmissions = getTopMinerEmissionsFromData(data);
   const minersText = data ? formatMinerCount(minerCount, topEmissions) : '—';
-  const minersTitle = data ? formatMinerCountTitle(minerCount, topEmissions) : 'Loading miner count';
+  let minersTitle = data
+    ? formatMinerCountTitle(minerCount, topEmissions, data)
+    : isV2DataSourceActive()
+      ? 'Loading taostats miner count'
+      : 'Loading miner count';
+
+  if (isV2DataSourceActive() && data) {
+    const v2Hint = ' (taostats v2)';
+    if (burnKnown && !burnTitle.includes('taostats')) {
+      burnTitle += v2Hint;
+    }
+    if (feeTitle && !feeTitle.includes('taostats')) {
+      feeTitle += v2Hint;
+    }
+    if (minersTitle && !minersTitle.includes('taostats')) {
+      minersTitle += v2Hint;
+    }
+  }
 
   let burnCell = row.querySelector(`.${COLUMN.BURN}`);
   let feeCell = row.querySelector(`.${COLUMN.FEE}`);
@@ -4765,18 +5115,28 @@ async function init() {
   sendRuntimeMessage({ type: MESSAGE.STOP_BACKGROUND_TRACKING });
 
   await loadMinerEmissionsPreference();
+  await loadEnableV2Preference();
+  await loadExplorerDataSourcePreference();
+  bindEnableV2PreferenceListener();
   ensureMinerEmissionsToggle();
   ensureSyncButton();
+  ensureDataSourceTabs();
 
   sendRuntimeMessage({ type: MESSAGE.SHEETS_PULL_IF_ENABLED }).catch(() => {});
 
   await refreshMetricsAndEnhance(false);
 
+  if (enableV2 && explorerDataSource === 'v2') {
+    await refreshV2MetricsAndEnhance();
+  } else if (enableV2) {
+    void refreshV2MetricsAndEnhance();
+  }
+
   // Repaint immediately when cache changes (subnet visit, sync, or background tracker).
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
 
-    if (changes?.[STORAGE_CACHE_KEY]) {
+    if (changes?.[STORAGE_CACHE_KEY] || changes?.[STORAGE_CACHE_V2_KEY]) {
       scheduleCacheEnhance({ immediate: true });
     }
 
@@ -4798,6 +5158,7 @@ async function init() {
     attempts += 1;
     ensureMinerEmissionsToggle();
     ensureSyncButton();
+    ensureDataSourceTabs();
     await refreshMetricsAndEnhance(false);
 
     const tableInfo = findSubnetTable();

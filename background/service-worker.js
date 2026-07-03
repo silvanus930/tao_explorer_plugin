@@ -1,4 +1,4 @@
-/* global decodeSubnetInfoValidated, decodeHyperparams, fetchSubnetMetrics, fetchAllSubnetRegFees, fetchSubnetFromTaoApp, normalizeTaoAppSubnet, fetchTaoUsdPrice, resolveTaoApiKey, buildRegFeeCachePatch, getCache, getCacheMeta, updateCacheEntries, replaceCacheMap, getSettings, getSheetsSettings, pullCacheFromSheets, pullCacheFromPublicSheet, pushCacheToSheets, syncCacheWithSheets, createSpreadsheet, mergeCacheMaps, withGoogleToken, TAO_API_KEY, DEFAULT_SHEET_URL */
+/* global decodeSubnetInfoValidated, decodeHyperparams, fetchSubnetMetrics, fetchAllSubnetRegFees, fetchSubnetFromTaoApp, normalizeTaoAppSubnet, fetchTaoUsdPrice, resolveTaoApiKey, buildRegFeeCachePatch, fetchAllSubnetsLatest, fetchTaostatsPriceInfo, resolveTaostatsApiKey, isValidTaostatsAuth, buildTaostatsV2CachePatch, getCache, getCacheMeta, updateCacheEntries, updateCacheEntriesV2, getCacheMetaV2, replaceCacheMap, getSettings, getSheetsSettings, pullCacheFromSheets, pullCacheFromPublicSheet, pushCacheToSheets, syncCacheWithSheets, createSpreadsheet, mergeCacheMaps, withGoogleToken, TAO_API_KEY, TAOSTATS_API_KEY, DEFAULT_SHEET_URL */
 
 try {
   importScripts('../config/secrets.js');
@@ -16,6 +16,7 @@ importScripts(
   '../api/scaleDecoder.js',
   '../api/rpcClient.js',
   '../api/taoClient.js',
+  '../api/taostatsClient.js',
   '../api/sheetsSync.js',
   '../api/cacheFile.js',
   '../storage/cache.js'
@@ -42,9 +43,11 @@ const MESSAGE = {
   SHEETS_PULL_IF_ENABLED: 'SHEETS_PULL_IF_ENABLED',
   CACHE_EXPORT: 'CACHE_EXPORT',
   CACHE_IMPORT: 'CACHE_IMPORT',
+  REFRESH_V2_METRICS: 'REFRESH_V2_METRICS',
 };
 
 let refreshPromise = null;
+let refreshV2Promise = null;
 let explorerRefreshTimer = null;
 let trackingEnabled = false;
 let trackingCursor = 0;
@@ -63,6 +66,7 @@ const SUBNET_SYNC_BUDGET_MS = 60_000;
 const SCRAPE_WINDOW_IDLE_CLOSE_MS = 120_000;
 const ABORT_POLL_MS = 200;
 const SHEETS_PUSH_TIMEOUT_MS = 20_000;
+const TAOSTATS_V2_REFRESH_TIMEOUT_MS = 75_000;
 
 function subnetPageUrl(netuid, activeTab = 'metagraph') {
   const base = `https://www.tao.app/subnets/${netuid}`;
@@ -179,6 +183,139 @@ async function applyBulkRegFees(netuids, settings, ttl) {
   }
 
   return Object.keys(updates).length;
+}
+
+async function refreshTaostatsV2Metrics(settings, ttl) {
+  if (!settings?.enableV2) {
+    return { ok: false, count: 0, error: 'enableV2 is off in settings' };
+  }
+
+  const auth = resolveTaostatsApiKey(settings);
+  if (!auth) {
+    return {
+      ok: false,
+      count: 0,
+      error:
+        'Missing taostats API key — add TAOSTATS_API_KEY in .env, run node scripts/sync-env.js, then reload the extension',
+    };
+  }
+
+  if (!isValidTaostatsAuth(auth)) {
+    return {
+      ok: false,
+      count: 0,
+      error: 'Invalid taostats API key format — expected tao-<uuid>:<secret>',
+    };
+  }
+
+  const result = await fetchAllSubnetsLatest(auth);
+  if (!Array.isArray(result)) {
+    const message =
+      result?.message || result?.error || 'taostats fetch failed';
+    console.warn('[TAO Subnet Analytics] taostats v2 fetch failed:', message, result?.response);
+    return { ok: false, count: 0, error: message, detail: result?.response ?? result };
+  }
+
+  const updates = {};
+  result.forEach((row) => {
+    const patch = buildTaostatsV2CachePatch(row, null);
+    if (patch) {
+      updates[String(patch.netuid)] = patch;
+    }
+  });
+
+  const count = Object.keys(updates).length;
+  if (count === 0) {
+    return { ok: false, count: 0, error: 'taostats returned no usable subnet rows' };
+  }
+
+  try {
+    await updateCacheEntriesV2(updates, ttl);
+  } catch (error) {
+    console.warn('[TAO Subnet Analytics] v2 cache write failed:', error);
+    return {
+      ok: false,
+      count: 0,
+      error: error?.message || 'Failed to save taostats v2 cache',
+    };
+  }
+
+  scheduleExplorerRefresh();
+
+  void fetchTaostatsPriceInfo(auth)
+    .then(async (priceInfo) => {
+      const price = Number(priceInfo?.price_usd);
+      if (!Number.isFinite(price) || price <= 0) {
+        return;
+      }
+
+      const pricedUpdates = {};
+      Object.values(updates).forEach((entry) => {
+        if (entry?.burnTao == null) {
+          return;
+        }
+        pricedUpdates[String(entry.netuid)] = {
+          ...entry,
+          taoUsd: price,
+          burnUsd: Number(entry.burnTao) * price,
+          updatedAt: Date.now(),
+        };
+      });
+
+      if (Object.keys(pricedUpdates).length > 0) {
+        await updateCacheEntriesV2(pricedUpdates, ttl);
+        scheduleExplorerRefresh();
+      }
+    })
+    .catch(() => {});
+
+  console.info('[TAO Subnet Analytics] taostats v2 saved', count, 'subnets');
+  return { ok: true, count };
+}
+
+async function runTaostatsV2Refresh(settings, ttl) {
+  return withTimeout(
+    refreshTaostatsV2Metrics(settings, ttl),
+    TAOSTATS_V2_REFRESH_TIMEOUT_MS,
+    'taostats v2 refresh'
+  ).catch((error) => ({
+    ok: false,
+    count: 0,
+    error: error?.message || 'taostats v2 refresh failed',
+  }));
+}
+
+async function queueTaostatsV2Refresh(settings, ttl) {
+  if (refreshV2Promise) {
+    return refreshV2Promise;
+  }
+
+  refreshV2Promise = runTaostatsV2Refresh(settings, ttl).finally(() => {
+    refreshV2Promise = null;
+  });
+
+  return refreshV2Promise;
+}
+
+async function ensureTaostatsV2Metrics(settings, ttl, { force = false } = {}) {
+  if (!settings?.enableV2) {
+    return 0;
+  }
+
+  const auth = resolveTaostatsApiKey(settings);
+  if (!auth) {
+    return 0;
+  }
+
+  const cacheMeta = await getCacheMetaV2();
+  const isStale = !force && cacheMeta.timestamp && Date.now() - cacheMeta.timestamp > ttl;
+
+  if (!isStale && cacheMeta.timestamp > 0) {
+    return 0;
+  }
+
+  const result = await queueTaostatsV2Refresh(settings, ttl);
+  return result?.count ?? 0;
 }
 
 async function setSyncStatus(status) {
@@ -877,6 +1014,10 @@ async function refreshMetricsFor(netuids, { ttl, settings }) {
     scheduleExplorerRefresh();
   }
 
+  if (settings.enableV2) {
+    void ensureTaostatsV2Metrics(settings, ttl, { force: false });
+  }
+
   if (settings.useTaoApi && apiKey) {
     // Enrich only those we refreshed (best-effort).
     await Promise.all(
@@ -911,6 +1052,9 @@ async function ensureMetrics(netuids = [], { force = false } = {}) {
   // Force refresh (used by explicit refresh) blocks until complete.
   if (force) {
     const fetched = await refreshMetricsFor(netuids, { ttl, settings });
+    if (settings.enableV2) {
+      await queueTaostatsV2Refresh(settings, ttl);
+    }
     return withCacheFlags(fetched, { isStale: false, cachedAt: Date.now() });
   }
 
@@ -940,6 +1084,10 @@ async function ensureMetrics(netuids = [], { force = false } = {}) {
       .finally(() => {
         refreshPromise = null;
       });
+  }
+
+  if (settings.enableV2) {
+    void ensureTaostatsV2Metrics(settings, ttl, { force: false });
   }
 
   return response;
@@ -1123,6 +1271,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
       case MESSAGE.SHEETS_PULL_IF_ENABLED: {
         return runSheetsPullIfEnabled();
+      }
+
+      case MESSAGE.REFRESH_V2_METRICS: {
+        const settings = await getSettings();
+        if (!settings.enableV2) {
+          return { ok: false, error: 'enableV2 is off' };
+        }
+
+        const ttl = Math.max(1, settings.refreshMinutes) * 60 * 1000;
+        return queueTaostatsV2Refresh(settings, ttl);
       }
 
       case MESSAGE.CACHE_EXPORT: {

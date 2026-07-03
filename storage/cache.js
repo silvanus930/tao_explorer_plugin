@@ -1,4 +1,5 @@
 const CACHE_KEY = 'subnetMetricsCache';
+const CACHE_V2_KEY = 'subnetMetricsCache_v2';
 const DEFAULT_TTL_MS = 10 * 60 * 1000;
 
 function normalizeCacheKey(key, entry) {
@@ -21,6 +22,7 @@ function entryFreshness(entry) {
     entry.rpcCapturedAt,
     entry.ownerIncentiveCapturedAt,
     entry.incentiveMinerCountCapturedAt,
+    entry.v2CapturedAt,
   ]
     .map((value) => Number(value))
     .filter((value) => Number.isFinite(value) && value > 0);
@@ -141,11 +143,77 @@ async function clearCache() {
   await chrome.storage.local.remove(CACHE_KEY);
 }
 
+async function getRawCacheV2Entry() {
+  const stored = await chrome.storage.local.get(CACHE_V2_KEY);
+  return stored[CACHE_V2_KEY] ?? null;
+}
+
+async function getCacheMapV2() {
+  const entry = await getRawCacheV2Entry();
+  if (!entry || !entry.value) {
+    return {};
+  }
+
+  return entry.value;
+}
+
+async function getCacheMetaV2() {
+  const entry = await getRawCacheV2Entry();
+  if (!entry) {
+    return { timestamp: 0, ttl: DEFAULT_TTL_MS };
+  }
+
+  return {
+    timestamp: entry.timestamp ?? 0,
+    ttl: entry.ttl ?? DEFAULT_TTL_MS,
+  };
+}
+
+async function setCacheV2(value, ttl = DEFAULT_TTL_MS) {
+  await chrome.storage.local.set({
+    [CACHE_V2_KEY]: {
+      timestamp: Date.now(),
+      ttl,
+      value: normalizeCacheMap(value),
+    },
+  });
+}
+
+async function updateCacheEntriesV2(updates, ttl = DEFAULT_TTL_MS) {
+  const current = normalizeCacheMap(await getCacheMapV2());
+  const merged = { ...current };
+  const now = Date.now();
+
+  Object.entries(updates || {}).forEach(([key, value]) => {
+    if (!value || typeof value !== 'object') {
+      return;
+    }
+
+    const cacheKey = normalizeCacheKey(key, value);
+    if (!cacheKey) {
+      return;
+    }
+
+    merged[cacheKey] = mergeCacheEntry(merged[cacheKey], {
+      ...value,
+      updatedAt: entryFreshness(value) || now,
+    });
+  });
+
+  await setCacheV2(merged, ttl);
+}
+
+async function clearCacheV2() {
+  await chrome.storage.local.remove(CACHE_V2_KEY);
+}
+
 async function getSettings() {
   const stored = await chrome.storage.sync.get({
     taoApiKey: '',
     refreshMinutes: 10,
     useTaoApi: false,
+    enableV2: false,
+    taostatsApiKey: '',
     sheetsEnabled: false,
     sheetsSpreadsheetId: '',
     sheetsAutoSync: true,

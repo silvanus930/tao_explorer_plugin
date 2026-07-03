@@ -6,7 +6,9 @@ const refreshMinutes = document.getElementById('refreshMinutes');
 const useTaoApi = document.getElementById('useTaoApi');
 const hideSubnetTradingView = document.getElementById('hideSubnetTradingView');
 const metagraphScrapeDebug = document.getElementById('metagraphScrapeDebug');
+const enableV2 = document.getElementById('enableV2');
 const taoApiKey = document.getElementById('taoApiKey');
+const taostatsApiKey = document.getElementById('taostatsApiKey');
 const sheetsEnabled = document.getElementById('sheetsEnabled');
 const sheetsSpreadsheetId = document.getElementById('sheetsSpreadsheetId');
 const sheetsAutoSync = document.getElementById('sheetsAutoSync');
@@ -252,6 +254,8 @@ async function loadSettings() {
     useTaoApi: false,
     hideSubnetTradingView: false,
     metagraphScrapeDebug: false,
+    enableV2: false,
+    taostatsApiKey: '',
     sheetsEnabled: false,
     sheetsSpreadsheetId: '',
     sheetsAutoSync: true,
@@ -264,7 +268,9 @@ async function loadSettings() {
   useTaoApi.checked = stored.useTaoApi;
   hideSubnetTradingView.checked = stored.hideSubnetTradingView === true;
   metagraphScrapeDebug.checked = stored.metagraphScrapeDebug === true;
+  enableV2.checked = stored.enableV2 === true;
   taoApiKey.value = stored.taoApiKey;
+  taostatsApiKey.value = stored.taostatsApiKey || '';
   sheetsEnabled.checked = stored.sheetsEnabled;
   sheetsSpreadsheetId.value = stored.sheetsSpreadsheetId || getBuiltInSheetUrl();
   sheetsAutoSync.checked = stored.sheetsAutoSync !== false;
@@ -313,6 +319,12 @@ metagraphScrapeDebug?.addEventListener('change', async () => {
   });
 });
 
+enableV2?.addEventListener('change', async () => {
+  await chrome.storage.sync.set({
+    enableV2: enableV2.checked === true,
+  });
+});
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
 
@@ -321,7 +333,9 @@ form.addEventListener('submit', async (event) => {
     useTaoApi: useTaoApi.checked,
     hideSubnetTradingView: hideSubnetTradingView.checked === true,
     metagraphScrapeDebug: metagraphScrapeDebug.checked === true,
+    enableV2: enableV2.checked === true,
     taoApiKey: taoApiKey.value.trim(),
+    taostatsApiKey: taostatsApiKey.value.trim(),
   };
 
   await chrome.storage.sync.set(settings);

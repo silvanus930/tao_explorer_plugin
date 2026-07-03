@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TAO Subnet Analytics",
-  "version": "1.10.9",
+  "version": "1.11.5",
   "description": "Adds subnet burn rate and registration fee to tao.app explorer",
   "permissions": [
     "storage",
@@ -21,6 +21,7 @@
     "https://tao.app/*",
     "https://api.tao.app/*",
     "https://entrypoint-finney.opentensor.ai/*",
+    "https://api.taostats.io/*",
     "https://www.googleapis.com/*",
     "https://sheets.googleapis.com/*",
     "https://docs.google.com/*"

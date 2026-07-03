@@ -476,6 +476,15 @@
             On subnet About or Metagraph tabs, show an insight modal after a successful scrape.
           </p>
 
+          <label class="toggle-row">
+            <span>Enable taostats v2 API</span>
+            <input id="enableV2" type="checkbox" />
+          </label>
+          <p class="field-hint" style="margin: -6px 0 12px">
+            Fetches owner burn, reg fee, and active miners from taostats.io into a separate v2 cache.
+            On the explorer, use the <strong>Taostats v2</strong> tab to view that data.
+          </p>
+
           <label class="field">
             <span class="field-label">TAO.app API key (optional)</span>
             <input
@@ -483,6 +492,16 @@
               type="text"
               autocomplete="off"
               placeholder="Paste key or use scripts/sync-env.js"
+            />
+          </label>
+
+          <label class="field">
+            <span class="field-label">Taostats API key (optional)</span>
+            <input
+              id="taostatsApiKey"
+              type="text"
+              autocomplete="off"
+              placeholder="tao-&lt;uuid&gt;:&lt;secret&gt; or use .env + sync-env.js"
             />
           </label>
 
